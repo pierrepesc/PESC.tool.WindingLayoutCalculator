@@ -1,13 +1,9 @@
 # PESC.tool.WindingSchem
-BLDC Winding schematic
+Winding Layout Calculator
 
 Open [winding_visualizer.html](winding_visualizer.html) in a browser for the standalone winding calculator, with linear and circular views, inner and outer stators, Y/delta connections, and SVG/PNG export. All JavaScript and CSS are embedded; no installation, server, or external dependencies are required.
 
-The embedded source uses English function names, variables, form fields, comments, and interface labels. `calculateWinding()` generates a slot/pole winding, `calculateManualWinding()` reads a manual scheme, and `displayWindingResults()` updates the properties and drawings. Both views share the connection plan produced by `buildCoilConnectionPlan()`; `calculateWindingFactors()` computes the harmonic factors.
-
-Shared links can use English query parameters, for example `winding_visualizer.html?slots=15&poles=10` or `winding_visualizer.html?scheme=ABCABCABCABCABC&poles=10`. Existing links using the original query parameter names remain supported.
-
-The English-only interface is organized into Winding Parameters, Winding Properties, View Options, and Winding Animation. Motor inputs and manual schemes are at the top; the compact properties section starts with the winding scheme. Factor details are collapsed by default and show a harmonic spectrum plot with hover values when expanded.
+The interface is organized into Winding Parameters, Winding Properties, View Options, and Winding Animation. Motor inputs and manual schemes are at the top; the compact properties section starts with the winding scheme. Factor details are collapsed by default and show a harmonic spectrum plot with hover values when expanded.
 
 Use **Calculate winding** after editing slots, poles, or a manual scheme. Layers, Y/delta termination, coil shortening, coil connection, and parallel branch changes update the diagram automatically.
 
