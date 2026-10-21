@@ -1,0 +1,3130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Winding Layout Calculator</title>
+<style>#statorCanvas { display:block; width:100%; height:auto; max-width:800px; }</style>
+
+<!--Scheme Calculator-->
+  <meta http-equiv="content-type" content="text/html; charset=utf-8" />
+  <script>/*
+
+Copyright (C) 2010 Felix Niessen (felix.niessen@googlemail.com || caendle.de) (Bewicklungsrechner XL)
+
+This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with this program; if not, see <http://www.gnu.org/licenses/>.
+
+__________________________________________
+
+Acknowledgements:
+- overclocker_2001 (oc2k1) and DrM (drmalte@maltemedia.de; historical address) for the original winding calculator.
+- Friedhelm S. for the formulas and instructions for calculating the winding factor.
+- Everyone in the RCN community who helped with the calculator.
+
+*/
+
+
+// Initialize after the document is ready.
+var isInit = false;
+window.onDomReady = function(fn){
+	if(window.addEventListener){
+		window.addEventListener("DOMContentLoaded", fn, false);
+	}else if(window.addEvent){
+		window.addEvent('domready',fn);
+	}else{
+		document.onreadystatechange = function(){
+			if(document.readyState == "interactive"  || document.readyState == "loaded" || document.readyState == "complete"){
+				!isInit ? fn():0;
+				isInit = true;
+			}
+		}
+        }
+}
+window.onDomReady(initializeCalculator);
+
+// Read the optional winding parameters from the URL.
+const urlParameters = new URLSearchParams();
+for(const [key,value] of new URLSearchParams(window.location.search)){
+    urlParameters.set(key.toLowerCase(),value);
+}
+// Legacy URL keys remain supported for previously shared calculator links.
+var queryParameters = {
+    scheme: urlParameters.get('scheme') ?? urlParameters.get('schema'),
+    slots: urlParameters.get('slots') ?? urlParameters.get('nuten'),
+    poles: urlParameters.get('poles') ?? urlParameters.get('pole')
+};
+var currentWindingStep=1;
+var calculatedSlots = false;
+var calculatedPoles = false;
+var calculatedScheme = false;
+var displayedScheme = false;
+var calculatedTermination = false;
+var isSingleLayer = false;
+var distributedWinding = false;
+var isManualScheme = false;
+var layerSelector = document.createElement('select');
+var terminationControlHTML = false;
+var coilShorteningSlots = 0;
+var skewCorrectionEnabled=false;
+var slotOpeningCorrectionEnabled = false;
+var hasWindingError = false;
+
+
+// Winding factor samples and optional correction results.
+var windingFactors = Array();
+var slotCorrectedFactors = Array(Array(),Array());
+var skewCorrectedFactors = Array(Array(),Array());
+var combinedCorrectedFactors = Array(Array(),Array());
+var referenceCycleTimes = Array(0.25,0.55);
+
+
+// Current winding factor display state.
+var fundamentalWindingFactor = 0;
+var factorDetailsExpanded = false;
+var precisionWarning = '';
+
+
+// English interface labels and validation messages.
+const labels = {
+    "slots": "Slots",
+    "poles": "Poles",
+    "layer": "layer",
+    "scheme": "Scheme",
+    "unwoundToothHelp": "for an unwound tooth",
+    "motorSectionHelp": "to separate a motor section",
+    "invalidSlotCount": "Number of slots must be divisible by 3!",
+    "invalidPoleCount": "Number of poles must be divisible by 2!",
+    "matchingSlotPoleCounts": "Pole count and slot count must be different!",
+    "unbalancedSolution": "Unbalanced solution!",
+    "relatedLinks": "See also:",
+    "unbalancedFactor": "Unbalanced!",
+    "slotOpeningFactor": "Involving the slot factor",
+    "statorDiameter": "Stator diameter:",
+    "slotOpening": "Slot opening:",
+    "applyCorrection": "Apply correction",
+    "slotSkew": "Skewed slots",
+    "skewInSlots": "By how many slots is the skewing",
+    "canvasUnavailable": "<p>Your browser does not support HTML 5!<br /> graphical representation is not possible. </p>"
+};
+
+// Build the calculator controls.
+var mainContainer = false;
+function initializeCalculator(){
+	mainContainer = document.getElementById('jsContainer');
+	mainContainer.innerHTML = '';
+	factorDetailsExpanded = false;
+	isSingleLayer = false;
+	mainContainer.innerHTML = `<form name="windingCalculator" onsubmit="return false;">
+        <div class="parameter-grid">
+          <div class="field" id="slotField"><label for="slotCount" id="slotCountLabel">Slots</label><input maxlength="2" id="slotCount" name="slotCount" inputmode="numeric" onchange="updateLayerControl(this.value,document.windingCalculator.poleCount.value,true);updateShorteningControl();" /></div>
+          <div class="field"><label for="poleCount">Poles</label><input maxlength="3" id="poleCount" name="poleCount" inputmode="numeric" onchange="updateLayerControl(document.windingCalculator.slotCount.value,this.value,true);updateShorteningControl();" /></div>
+          <div class="field" id="layerField"><label for="layers">Layers</label></div>
+          <div id="terminationFields" class="termination-fields"><div class="field"><label for="phaseTermination">Phase termination</label><select id="phaseTermination" onchange="recalculateWinding();"><option value="-">Δ / Delta</option><option value="Y">Y / Star</option></select></div></div>
+        </div>
+        <div id="connectionFields"></div>
+        <div class="form-actions"><input type="submit" onclick="calculateWinding();return false;" id="calculateWindingButton" value="Calculate winding" /><button type="button" id="manualSchemeToggle" onclick="enableManualScheme();" aria-pressed="false">Enter manual scheme</button></div>
+        <div id="info" class="field-help"></div>
+      </form>`;
+    document.getElementById('connectionFields').appendChild(document.getElementById('coilConnectionControls'));
+
+	if(queryParameters['scheme'] && queryParameters['poles'] && isNaN(queryParameters['scheme'])){
+		setTimeout(enableManualScheme,20);
+		setTimeout(()=>document.windingCalculator.slotCount.value=queryParameters.scheme,30);
+		setTimeout(()=>document.windingCalculator.poleCount.value=queryParameters.poles,30);
+		setTimeout(calculateManualWinding,40);
+	}else if(queryParameters['slots'] && queryParameters['poles'] && !isNaN(queryParameters['slots'])){
+		setTimeout(()=>document.windingCalculator.slotCount.value=queryParameters.slots,30);
+		setTimeout(()=>document.windingCalculator.poleCount.value=queryParameters.poles,30);
+		setTimeout(calculateWinding,40);
+		setTimeout(()=>updateLayerControl(false,false,false),45);
+		setTimeout(updateShorteningControl,50);
+	}
+}
+
+
+function updateShorteningControl(){
+	var distributedSlotInput = document.windingCalculator.slotCount.value;
+	var distributedPoleInput = document.windingCalculator.poleCount.value;
+	distributedSlotInput = distributedSlotInput.replace(/ /g,'');
+	var slotsPerPolePerPhase = distributedSlotInput/3/distributedPoleInput;
+	var terminationFieldsContainer = document.getElementById('terminationFields');
+    var retainedTermination=document.getElementById('phaseTermination')?.value || calculatedTermination || '-';
+	if(!terminationControlHTML){
+		terminationControlHTML = terminationFieldsContainer.innerHTML;
+	}
+	if(!isNaN(distributedSlotInput) && !isSingleLayer && slotsPerPolePerPhase >= 1){
+		terminationFieldsContainer.innerHTML = terminationControlHTML+'<div class="field"><label for="coilShortening">Coil shortening (slots)</label><input type="text" inputmode="numeric" maxlength="1" id="coilShortening" value="'+coilShorteningSlots+'" onchange="recalculateWinding();" /></div>';
+	}else if(slotsPerPolePerPhase < 1){
+		terminationFieldsContainer.innerHTML = terminationControlHTML;
+	}else{
+		terminationFieldsContainer.innerHTML = terminationControlHTML;
+	}
+    if(document.getElementById('phaseTermination'))document.getElementById('phaseTermination').value=retainedTermination;
+}
+
+
+// Offer one or two layers when the slot count permits it.
+function updateLayerControl(layerSlotInput,layerPoleInput,refresh){
+	var layerSlotInput  = document.windingCalculator.slotCount.value;
+	var layerPoleInput = document.windingCalculator.poleCount.value;
+	layerSlotInput = layerSlotInput.replace(/ /g,'');
+
+	if(layerSlotInput%2==0 && !isNaN(layerSlotInput)){
+		layerSelector.name="layerCountInput";
+        layerSelector.id="layers";
+		layerSelector.onchange = function(){changeLayerCount();}
+		layerSelector.innerHTML ="";
+		var singleLayerOption = document.createElement('option');
+		singleLayerOption.value = "1";
+		singleLayerOption.innerHTML = "1 "+labels.layer;
+		var doubleLayerOption = document.createElement('option');
+		doubleLayerOption.value = "2";
+		doubleLayerOption.innerHTML = "2 layers";
+		if(isSingleLayer){
+			singleLayerOption.selected="selected";
+			layerSelector.appendChild(singleLayerOption);
+			layerSelector.appendChild(doubleLayerOption);
+		}else if(!isSingleLayer){
+			doubleLayerOption.selected="selected";
+			layerSelector.appendChild(doubleLayerOption);
+			layerSelector.appendChild(singleLayerOption);
+		}
+		document.getElementById('layerField').appendChild(layerSelector);
+		document.getElementById('layerField').hidden=false;
+	}else if(document.windingCalculator.layerCountInput){
+		layerSelector.remove();
+		document.getElementById('layerField').hidden=true;
+		if(refresh){
+			isSingleLayer = false;
+		}
+	}
+}
+
+function recalculateWinding(){
+    if(!lastWindingDraw)return;
+    if(document.windingCalculator.classList.contains('manual-scheme'))calculateManualWinding();
+    else calculateWinding();
+}
+
+function changeLayerCount(){
+	if(document.windingCalculator.layerCountInput.value == "1"){
+		isSingleLayer = true;
+		distributedWinding = false;
+		coilShorteningSlots = 0;
+		updateShorteningControl();
+	}else if(document.windingCalculator.layerCountInput.value == "2"){
+		isSingleLayer = false;
+		distributedWinding = false;
+		updateShorteningControl();
+	}
+    recalculateWinding();
+}
+
+
+// Switch between manual schemes and slot/pole inputs.
+function enableManualScheme(){
+    document.windingCalculator.classList.add('manual-scheme');
+    document.getElementById('slotCount').removeAttribute('inputmode');
+	document.getElementById('slotCountLabel').innerHTML=labels.scheme;
+	document.getElementById('info').innerHTML = '<span style="color:#999; font-size:9px;">( - '+labels.unwoundToothHelp+')</span> &nbsp; <span style="color:#999; font-size:9px;">( / '+labels.motorSectionHelp+')</span>'
+	document.getElementById('slotCount').size='35';
+	document.getElementById('slotCount').maxLength='99';
+	if(calculatedScheme && !distributedWinding){
+		document.getElementById('slotCount').value = calculatedScheme;
+	}else if(distributedWinding){
+		document.getElementById('slotCount').value = distributedWinding;
+	}
+	document.getElementById('manualSchemeToggle').textContent='Use slot / numberOfPoles inputs';
+    document.getElementById('manualSchemeToggle').setAttribute('aria-pressed','true');
+	document.getElementById('manualSchemeToggle').onclick=function(){enableSlotPoleInputs();}
+	document.getElementById('calculateWindingButton').onclick = function(){calculateManualWinding(); return false;}
+	updateLayerControl(document.windingCalculator.slotCount.value,document.windingCalculator.poleCount.value,false);
+	updateShorteningControl();
+}
+function enableSlotPoleInputs(){
+    document.windingCalculator.classList.remove('manual-scheme');
+    document.getElementById('slotCount').setAttribute('inputmode','numeric');
+	document.getElementById('slotCountLabel').innerHTML=labels.slots;
+	document.getElementById('slotCount').size='3';
+	document.getElementById('slotCount').maxLength='2';
+	document.getElementById('info').innerHTML = '';
+	if(calculatedScheme && !distributedWinding){
+		document.getElementById('slotCount').value = calculatedScheme.length;
+	}else if(distributedWinding){
+		var schemeSlotParts = distributedWinding.split('|');
+		document.getElementById('slotCount').value = schemeSlotParts.length-1;
+	}
+	document.getElementById('manualSchemeToggle').textContent='Enter manual scheme';
+    document.getElementById('manualSchemeToggle').setAttribute('aria-pressed','false');
+	document.getElementById('manualSchemeToggle').onclick=function(){enableManualScheme();}
+	document.getElementById('calculateWindingButton').onclick = function(){calculateWinding(document.windingCalculator); return false;}
+	validationError = false;
+	updateLayerControl(document.windingCalculator.slotCount.value,document.windingCalculator.poleCount.value,false);
+	updateShorteningControl();
+}
+
+
+function calculateManualWinding(){
+	var singleLayer = false;
+	var windingScheme = document.getElementById('slotCount').value.replace(/ /g,'');
+	windingScheme = windingScheme.replace(/U/g,'A');
+	windingScheme = windingScheme.replace(/u/g,'a');
+	windingScheme = windingScheme.replace(/V/g,'B');
+	windingScheme = windingScheme.replace(/v/g,'b');
+	windingScheme = windingScheme.replace(/W/g,'C');
+	windingScheme = windingScheme.replace(/w/g,'c');
+	if(windingScheme.indexOf('|')!=-1){
+		distributedWinding = true;
+	}else{
+		distributedWinding = false;
+	}
+
+	if(distributedWinding){
+		distributedWinding = windingScheme;
+		var slotPatternParts = windingScheme.split('|');
+		windingScheme = "";
+		for(i=0;i<slotPatternParts.length;i++){
+			windingScheme = windingScheme+"-";
+		}
+		windingScheme = windingScheme.replace(/\|/g,'').replace(/a/g,'').replace(/b/g,'').replace(/c/g,'');
+	}
+
+	windingScheme.indexOf('-')!=-1?singleLayer = true:0;
+	if(windingScheme[0] == '-' && windingScheme[windingScheme.length-1]== '-'){
+		windingScheme = windingScheme.substr(1);
+	}else if(windingScheme[0] != '-' && windingScheme[windingScheme.length-1]!= '-' && singleLayer && windingScheme.length % 3 != 0){
+		windingScheme = windingScheme+'-';
+	}
+	var sectionedScheme = windingScheme;
+	windingScheme = windingScheme.replace(/\//g,'');
+	var slotCount = windingScheme.length;
+	var poleCount = document.getElementById('poleCount').value;
+	if( slotCount % 3 != 0 || slotCount < 3 ) {
+		document.getElementById('windingSchemeResult').innerHTML = labels.invalidSlotCount;
+		document.windingCalculator.slotCount.focus();
+		document.windingCalculator.slotCount.select();
+		highlightInvalidInput(document.windingCalculator.slotCount.id);
+		clearWindingResults();
+		return;
+	}
+
+	if( poleCount % 2 != 0 || poleCount < 2 ) {
+		document.getElementById('windingSchemeResult').innerHTML  = labels.invalidPoleCount;
+		document.windingCalculator.poleCount.focus();
+		document.windingCalculator.poleCount.select();
+		highlightInvalidInput(document.windingCalculator.poleCount.id);
+		clearWindingResults();
+		return;
+	}
+
+	if( poleCount == slotCount ) {
+		document.getElementById('windingSchemeResult').innerHTML  = labels.matchingSlotPoleCounts;
+		document.windingCalculator.poleCount.focus();
+		document.windingCalculator.poleCount.select();
+		highlightInvalidInput(document.windingCalculator.poleCount.id);
+		clearWindingResults();
+		return;
+	}
+	isManualScheme = true;
+	displayWindingResults(slotCount,poleCount,windingScheme,false,singleLayer,sectionedScheme);
+}
+
+
+// Display the phase scheme, cogging period, winding factors, and diagram.
+function displayWindingResults(numberOfSlots,numberOfPoles,windingScheme,validationError,singleLayer,sectionedScheme){
+	calculatedSlots = numberOfSlots;
+	calculatedScheme = windingScheme;
+	displayedScheme = sectionedScheme;
+	calculatedPoles = numberOfPoles;
+	factorDetailsExpanded = false;
+	var schemeResultElement = document.getElementById('windingSchemeResult');
+	var coloredSchemeHTML = '';
+
+	// Color each scheme letter by its phase.
+	if(!distributedWinding){
+		for(y=0;y<sectionedScheme.length;y++){
+			symbolColor = phaseColor (sectionedScheme[y]);
+			coloredSchemeHTML += '<span id="s_'+(y+1)+'" style="color:'+symbolColor+';">'+sectionedScheme[y]+'</span>';
+		}
+	}else{
+		var conductorSequence = distributedWinding.replace(/\|/g,'');
+		for(i=0;i<conductorSequence.length;i++){
+			if(conductorSequence[0] == conductorSequence[conductorSequence.length-1]){
+				var rotatedSymbol = conductorSequence[conductorSequence.length-1];
+				conductorSequence = rotatedSymbol+conductorSequence.substring(0,conductorSequence.length-1);
+			}else{
+				break;
+			}
+		}
+		distributedWinding = "";
+		for(i=0;i<conductorSequence.length;i++){
+			distributedWinding += conductorSequence[i]+'|';
+		}
+		if(!isSingleLayer && !isManualScheme){
+			var doubleLayerPattern = "";
+			for(y=0;y<distributedWinding.length;y++){
+				if(distributedWinding[y]!='|' && distributedWinding[y]!='/' && distributedWinding[y]!='-'){
+					doubleLayerPattern+=distributedWinding[y]+distributedWinding[y];
+				}else{
+					doubleLayerPattern+=distributedWinding[y];
+				}
+			}
+			distributedWinding = doubleLayerPattern;
+		}
+		for(y=0;y<distributedWinding.length;y++){
+			symbolColor = phaseColor (distributedWinding[y]);
+			coloredSchemeHTML += '<span id="s_'+(y+1)+'" style="color:'+symbolColor+';">'+distributedWinding[y]+'</span>';
+		}
+	}
+	if(document.getElementById('coilShortening') && !isNaN(document.getElementById('coilShortening').value) && !isSingleLayer && distributedWinding && distributedWinding.split('|').some(slot=>slot.length===2)){
+		var requestedShortening = document.getElementById('coilShortening').value;
+		coilShorteningSlots = requestedShortening;
+		var slotLayerPatterns = distributedWinding.split('|');
+		var firstLayerPattern = "";
+		var secondLayerPattern = "";
+		for(i=0;i<slotLayerPatterns.length-1;i++){
+			firstLayerPattern += slotLayerPatterns[i][1];
+			secondLayerPattern += slotLayerPatterns[i][0];
+		}
+		var shortenedSlotPattern = "";
+
+		for(i=0;i<requestedShortening;i++){
+			var rotatedSymbol = firstLayerPattern[0];
+			firstLayerPattern = firstLayerPattern.substring(1)+rotatedSymbol;
+		}
+		for(i=0;i<slotLayerPatterns.length-1;i++){
+			shortenedSlotPattern += firstLayerPattern[i]+secondLayerPattern[i]+'|';
+		}
+		distributedWinding=shortenedSlotPattern;
+		coloredSchemeHTML = "";
+		for(y=0;y<distributedWinding.length;y++){
+			symbolColor = phaseColor (distributedWinding[y]);
+			coloredSchemeHTML += '<span id="s_'+(y+1)+'" style="color:'+symbolColor+';">'+distributedWinding[y]+'</span>';
+		}
+	}
+
+	if(!distributedWinding){
+		resetWindingSteps();
+		currentWindingStep=1;
+	}else{
+		document.getElementById('steps').innerHTML='';
+	}
+
+
+	if(validationError){
+		schemeResultElement.innerHTML = validationError+"( "+coloredSchemeHTML+" )";
+		hasWindingError = true;
+	}else{
+		schemeResultElement.innerHTML = coloredSchemeHTML;
+		hasWindingError = false;
+	}
+	// Compute the least common multiple of slots and poles.
+	var coggingPeriod = false;
+	a = numberOfSlots;
+	b = numberOfPoles;
+	x = a;
+	y = b;
+
+	while (x<y||x>y){
+		if (x-y<0){
+			x=x*1+a*1;
+		}else{
+			y=y*1+b*1;
+		}
+
+		}
+	coggingPeriod = x;
+
+	document.getElementById('primaryProperties').innerHTML = '<div class="property-metric"><span>Cogging steps / revolution</span><strong>'+coggingPeriod+'</strong><small>LCM('+numberOfSlots+', '+numberOfPoles+')</small></div>';
+	if(document.getElementById('phaseTermination')){
+		var selectedTermination = document.getElementById('phaseTermination').value;
+	}else{
+		var selectedTermination  = '-';
+	}
+	selectedTermination  == '-' ? selectedTermination= false:0;
+
+	calculatedTermination = selectedTermination;
+	drawStator(numberOfSlots,sectionedScheme,false,selectedTermination);
+	calculateWindingFactors(windingScheme,singleLayer);
+	displayFundamentalWindingFactor();
+	drawWindingFactorSpectrum(windingFactors);
+	if(slotOpeningCorrectionEnabled){
+		document.getElementById('includeSlotOpeningFactor').checked = "checked";
+		updateSlotOpeningFactor();
+	}
+	if(skewCorrectionEnabled){
+		document.getElementById('includeSkewFactor').checked = "checked";
+		updateSkewFactor();
+	}
+
+	// Find any related winding examples linked on the page.
+	var pageLinks = document.getElementsByTagName('a');
+	var relatedLinksContainer = document.getElementById('relatedLinksContainer');
+	relatedLinksContainer.innerHTML = '';
+	var relatedLinks = Array();
+	for(i=0;i<pageLinks.length;i++){
+		if(pageLinks[i].className == 'N_'+numberOfSlots+'_'+'P_'+numberOfPoles){
+			relatedLinks[relatedLinks.length] = pageLinks[i];
+		}
+	}
+	if(relatedLinks[0] && relatedLinks[0] != ''){
+		var relatedLinksHTML = '<div>'+labels.relatedLinks+'</div><ul>';
+		for(i=0;i<relatedLinks.length;i++){
+			relatedLinksHTML += '<li><a href="'+relatedLinks[i].href+'">'+relatedLinks[i].innerHTML+'</a></li>';
+		}
+		relatedLinksContainer.innerHTML = relatedLinksHTML+'</ul>';
+	}
+	if(document.getElementById('includeSlotOpeningFactor')){
+		if(!slotOpeningCorrectionEnabled){
+			document.getElementById('includeSlotOpeningFactor').checked = false;
+		}
+		if(!skewCorrectionEnabled){
+			document.getElementById('includeSkewFactor').checked = false;
+		}
+	}
+	if(!factorDetailsExpanded){
+		renderCoilTurnInputs();
+	}
+}
+
+function displayFundamentalWindingFactor(){
+	if(windingFactors[0][(calculatedPoles/2)-1]==windingFactors[1][(calculatedPoles/2)-1]){
+		fundamentalWindingFactor = windingFactors[0][(calculatedPoles/2)-1];
+	}else{
+		fundamentalWindingFactor = '<span style="color:#CC0000;">'+labels.unbalancedFactor+'</span>'
+	}
+
+	if(document.getElementById('factorSpectrum')){
+		factorDetailsButtonHTML = '<button type="button" class="text-button" id="showFactorDetails" onclick="hideFactorDetails();">Hide factor details</button>';
+	}else{
+		factorDetailsButtonHTML = '<button type="button" class="text-button" id="showFactorDetails" onclick="showFactorDetails();">Show factor details</button>';
+	}
+
+	document.getElementById('primaryProperties').innerHTML += '<div class="property-metric"><span>Winding factor</span><strong>'+fundamentalWindingFactor+'</strong>'+factorDetailsButtonHTML+'</div>';
+
+
+}
+
+
+// Optional motor inputs are independent of the collapsed factor plot.
+function ensureFactorParameters(){
+	if(!document.getElementById('factorCorrectionInputs')){
+		var correctionInputsHTML ='<table id="factorCorrectionInputs" border="0" width="100%" cellpadding="0" cellspacing="2">';
+		correctionInputsHTML +='<tr>';
+		correctionInputsHTML +='<td style="text-align:left; font-weight:bold;">'+labels.slotOpeningFactor+'</td><td>'+labels.statorDiameter+' </td><td style="text-align:left;"> <input style="font-size:10px;" onblur="updateSlotOpeningFactor();"  onchange="updateSlotOpeningFactor();" type="text" size="3" id="statorDiameter" /> mm</td><td>'+labels.slotOpening+' </td><td style="text-align:left;"><input onchange="updateSlotOpeningFactor();" onblur="updateSlotOpeningFactor();" style="font-size:10px;" type="text" size="3" id="slotOpening" /> mm</td><td>'+labels.applyCorrection+'<input id="includeSlotOpeningFactor" onchange="updateSlotOpeningFactor();" type="checkbox" /></td>';
+		correctionInputsHTML +='</tr>';
+		correctionInputsHTML +='<tr>';
+		correctionInputsHTML +='<td style="text-align:left; font-weight:bold;">'+labels.slotSkew+'</td><td colspan="3">'+labels.skewInSlots+': </td><td><input  style="font-size:10px;" type="text" size="3" onchange="updateSkewFactor();" onblur="updateSkewFactor();" id="slotSkew" /> '+labels.slots+'</td><td style="text-align:left;">'+labels.applyCorrection+'<input onchange="updateSkewFactor();" id="includeSkewFactor" type="checkbox" /></td>';
+		correctionInputsHTML +='</tr>';
+		correctionInputsHTML +='</table><div id="coilTurnsEditor"></div>';
+
+		document.getElementById('factorParameterFields').innerHTML=correctionInputsHTML;
+		renderCoilTurnInputs();
+	}
+}
+function showFactorDetails(){
+    document.getElementById('factorDetails').innerHTML='<div id="factorSpectrumHeading" class="factor-plot-heading">Winding factor spectrum</div><div id="factorSpectrum" class="factor-plot"></div>';
+    factorDetailsExpanded=true;
+    document.getElementById('showFactorDetails').textContent='Hide factor details';
+    document.getElementById('showFactorDetails').onclick=hideFactorDetails;
+    const factors=slotOpeningCorrectionEnabled?(skewCorrectionEnabled?combinedCorrectedFactors:slotCorrectedFactors):(skewCorrectionEnabled?skewCorrectedFactors:windingFactors);
+    drawWindingFactorSpectrum(factors);
+}
+var factorAnimationRunning=false;
+function renderCoilTurnInputs(){
+	if(!distributedWinding){
+		var turnInputsContainer = document.getElementById("coilTurnsEditor");
+        if (!turnInputsContainer) return;
+		turnInputsContainer.innerHTML = '';
+		if(!distributedWinding){
+			var started = false;
+			var turnInputsHTML = "";
+			turnInputsHTML += '<span style="font-weight:bold;">Turns per coil:</span><div style="font-size:11px;">';
+			var turnInputColumn = 0
+			for(i=0;i<calculatedScheme.length;i++){
+				if(turnInputColumn ==0){turnInputsHTML += '<div style="margin:2px; background-color:#EAEAEA;">';}
+				if(calculatedScheme[i]!='-'){
+					turnInputsHTML += calculatedScheme[i]+'<input type="text" size="1" style="width:20px;" id="coil-turns-'+[i]+'" value="1" />&nbsp;';
+				}else{
+					turnInputsHTML += calculatedScheme[i]+'<input type="text" size="1" style="width:20px;" id="coil-turns-'+[i]+'" value="0" disabled="disabled" />&nbsp;';
+				}
+				turnInputColumn++;
+				if(turnInputColumn ==20){turnInputsHTML += '<div>'; turnInputColumn = 0; }
+			}
+			if(turnInputColumn !=0){turnInputsHTML += '<div>'; turnInputColumn = 0; }
+			turnInputsHTML += '<br /><br /><input type="button" onclick="startFactorAnimation()" value="Show factor animation" />';
+			turnInputsHTML += '<div id="animationC"></div></div>';
+			turnInputsContainer.innerHTML=turnInputsHTML;
+		}
+	}
+}
+var factorAnimationSamples = Array();
+function startFactorAnimation(){
+	document.getElementById('animationC').innerHTML="";
+	var invalidCoilTurns = false;
+	var coilTurns = Array();
+	for(i=0;i<calculatedScheme.length;i++){
+		var turnCountValue = document.getElementById("coil-turns-"+[i]).value;
+		coilTurns[coilTurns.length] = turnCountValue;
+		if(turnCountValue == '' || isNaN(turnCountValue)){
+			highlightInvalidInput("coil-turns-"+[i]);
+			invalidCoilTurns = true;
+		}
+	}
+	if(!invalidCoilTurns){
+		var maximumSlotTurns = 1;
+		for(k=0;k<coilTurns.length;k++){
+			var currentTurns = 0;
+			var previousTurns = 0;
+
+			currentTurns = coilTurns[k];
+			if(i=0){
+				previousTurns = coilTurns[coilTurns.length-1];
+			}else{
+				previousTurns = coilTurns[k-1];
+			}
+			var candidateSlotTurns = parseInt(currentTurns)+parseInt(previousTurns);
+			if(candidateSlotTurns>maximumSlotTurns){
+				maximumSlotTurns = candidateSlotTurns;
+			}
+		}
+		var animationCalculation = calculateFactorAnimationSamples(calculatedScheme,coilTurns,calculatedPoles,maximumSlotTurns);
+	}
+}
+
+function calculateFactorAnimationSamples(calculatedScheme,coilTurns,harmonicPoleCount,maximumSlotTurns){
+	factorAnimationSamples = Array();
+	for(sampleIndex=0;sampleIndex<400;sampleIndex++){
+		var factorSample = sampleWindingFactor(calculatedScheme,coilTurns,harmonicPoleCount,(sampleIndex/100),maximumSlotTurns);
+		factorAnimationSamples[factorAnimationSamples.length]  = factorSample;
+	}
+	factorAnimationRunning=false;
+	setTimeout(renderFactorAnimation,150);
+}
+
+
+function renderFactorAnimation(){
+	var factorAnimationContainer = document.getElementById('animationC');
+	var minimumSampleFactor = 1;
+	var maximumSampleFactor = 0;
+	var averageSampleFactor = 0;
+	for(e=0;e<factorAnimationSamples.length;e++){
+		if(minimumSampleFactor>factorAnimationSamples[e]){minimumSampleFactor = factorAnimationSamples[e];}
+		if(maximumSampleFactor<factorAnimationSamples[e]){maximumSampleFactor = factorAnimationSamples[e];}
+		averageSampleFactor = averageSampleFactor+factorAnimationSamples[e];
+	}
+	averageSampleFactor = Math.round((averageSampleFactor/factorAnimationSamples.length)* 100000) / 100000;
+
+
+	var factorAnimationHTML = '<table width="100%" border="0" cellpadding="1" cellspacing="0">';
+	factorAnimationHTML += '<tr><td width="80%"><table height="250" width="100%" border="0" cellpadding="1" cellspacing="0"><tr>';
+	for(animationColumnIndex=17; animationColumnIndex>0;animationColumnIndex--){
+		factorAnimationHTML += '<td colspan="2" height="11" id="factor-time-'+animationColumnIndex+'" valign="bottom" style="font-size:9px;"></td>';
+	}
+	factorAnimationHTML += '</tr>';
+	factorAnimationHTML += '<tr>';
+	for(animationColumnIndex=34; animationColumnIndex>0;animationColumnIndex--){
+		factorAnimationHTML += '<td height="238" valign="bottom"><div style="width:15px; height:0px; background-color:#339966;" id="factor-bar-'+animationColumnIndex+'"></div></td>';
+	}
+	factorAnimationHTML += '</tr></table></td><td width="20%"><table height="250" width="100%" border="0" cellpadding="1" cellspacing="0">';
+	factorAnimationHTML += '<tr>';
+	factorAnimationHTML += '<td height="16%" id="factorMinimum" valign="top">time</td>';
+	factorAnimationHTML += '</tr>';
+	factorAnimationHTML += '<tr>';
+	factorAnimationHTML += '<td height="28%" id="factorMinimum" valign="top">max:<br />'+maximumSampleFactor+'</td>';
+	factorAnimationHTML += '</tr>';
+	factorAnimationHTML += '<tr>';
+	factorAnimationHTML += '<td height="28%" id="factorMaximum" valign="middle">mean:<br />'+averageSampleFactor+'</td>';
+	factorAnimationHTML += '</tr>';
+	factorAnimationHTML += '<tr>';
+	factorAnimationHTML += '<td height="28%" id="factorMean" valign="bottom">min:<br />'+minimumSampleFactor+'</td>';
+	factorAnimationHTML += '</tr>';
+	factorAnimationHTML += '</table></td></tr></table>';
+	factorAnimationRunning=true;
+	factorAnimationContainer.innerHTML=factorAnimationHTML;
+	scheduleFactorAnimationFrame(0);
+}
+
+function scheduleFactorAnimationFrame(frameIndex){
+	if(factorAnimationRunning){
+		if(frameIndex>=400){
+			frameIndex = 0;
+			setTimeout(()=>drawFactorAnimationFrame(frameIndex),200);
+		}else{
+			setTimeout(()=>drawFactorAnimationFrame(frameIndex),60);
+		}
+	}
+}
+
+function drawFactorAnimationFrame(frameIndex){
+	for(animationHistoryIndex=1; animationHistoryIndex<34;animationHistoryIndex++){
+		if(factorAnimationSamples[frameIndex-animationHistoryIndex]){
+			document.getElementById('factor-bar-'+animationHistoryIndex).style.height = Math.round(factorAnimationSamples[frameIndex-animationHistoryIndex]*236)+"px"
+			if(animationHistoryIndex%2==0){
+				document.getElementById('factor-time-'+(animationHistoryIndex/2)).innerHTML = ((frameIndex-animationHistoryIndex)/100);
+			}
+		}else{
+			document.getElementById('factor-bar-'+animationHistoryIndex).style.height = 0+"px"
+			if(animationHistoryIndex%2==0){
+				document.getElementById('factor-time-'+(animationHistoryIndex/2)).innerHTML = '';
+			}
+		}
+	}
+	frameIndex = frameIndex+1
+	scheduleFactorAnimationFrame(frameIndex);
+}
+
+
+function hideFactorDetails(){
+	factorDetailsExpanded = false;
+	document.getElementById('factorDetails').innerHTML = '';
+	document.getElementById('showFactorDetails').textContent='Show factor details';
+	document.getElementById('showFactorDetails').onclick= function(){showFactorDetails();}
+
+}
+
+function drawWindingFactorSpectrum(factorValues){
+    const host=document.getElementById('factorSpectrum');
+    if(!host)return;
+    const count=Number(calculatedSlots)*2;
+    const samples=factorValues.map(row=>Array.from({length:count},(_,i)=>Number.isFinite(Number(row[i]))?Number(row[i]):null));
+    const different=samples.length>1 && samples[0].some((value,i)=>value!==null && Math.abs(value-samples[1][i])>1e-7);
+    const series=different?samples.slice(0,2):samples.slice(0,1);
+    const colors=['#3477ad','#d89139'],w=900,h=210,left=44,right=14,top=16,bottom=38;
+    const plotW=w-left-right,plotH=h-top-bottom,values=series.flat().filter(value=>value!==null);
+    const lower=values.some(value=>value<0)?-1:0,upper=Math.max(1,Math.ceil(Math.max(0,...values)*4)/4);
+    const x=order=>left+(order-.5)*plotW/count,y=value=>top+(upper-value)/(upper-lower)*plotH;
+    let svg=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="Winding factor versus spatial harmonic order" data-factor-count="${count}"><title>Winding factor spectrum</title>`;
+    for(let tick=0;tick<=4;tick++){
+        const value=lower+(upper-lower)*tick/4,py=y(value);
+        svg+=`<path d="M${left} ${py}H${w-right}" stroke="#e4eaf1"/><text x="${left-8}" y="${py+3}" text-anchor="end" fill="#748397" font-size="10">${Number(value.toFixed(2))}</text>`;
+    }
+    const workingOrder=Number(calculatedPoles)/2,workingX=x(workingOrder);
+    if(workingOrder<=count)svg+=`<path d="M${workingX} ${top}V${h-bottom}" stroke="#9caec0" stroke-dasharray="3 3"/>`;
+    const band=plotW/count,barWidth=Math.max(.7,Math.min(14,band*.72/series.length));
+    for(let i=0;i<count;i++)for(let sample=0;sample<series.length;sample++){
+        const value=series[sample][i];if(value===null)continue;
+        const px=x(i+1)+(sample-(series.length-1)/2)*barWidth,py=Math.min(y(0),y(value));
+        svg+=`<rect class="factor-bar" data-order="${i+1}" data-sample="${sample}" data-factor="${value}" x="${px-barWidth/2}" y="${py}" width="${barWidth}" height="${Math.max(.6,Math.abs(y(value)-y(0)))}" fill="${colors[sample]}"><title>Order ${i+1} · ${(i+1)*2} poles · factor ${value}${different?' · t = '+referenceCycleTimes[sample]:''}</title></rect>`;
+    }
+    const tickEvery=Math.max(1,Math.ceil(count/10));
+    const ticks=[1,...Array.from({length:Math.floor(count/tickEvery)},(_,i)=>(i+1)*tickEvery)];
+    if(count-ticks.at(-1)>tickEvery*.6)ticks.push(count);
+    for(const order of [...new Set(ticks)])svg+=`<text x="${x(order)}" y="${h-bottom+16}" text-anchor="middle" fill="#748397" font-size="10">${order}</text>`;
+    svg+=`<text x="${left+plotW/2}" y="${h-3}" text-anchor="middle" fill="#65758a" font-size="11">Spatial harmonic order (numberOfPoles pairs)</text></svg>`;
+    const legend=different?series.map((_,i)=>`<span><i style="background:${colors[i]}"></i>t = ${referenceCycleTimes[i]}</span>`).join(''):'';
+    host.innerHTML=`<div class="factor-plot-legend">${legend}<span>Working harmonic: ${workingOrder}</span><span>Hover over a bar for its value</span></div>`+svg;
+}
+
+
+// Apply the slot-opening correction to the winding factors.
+function updateSlotOpeningFactor(){
+	if(document.getElementById('includeSlotOpeningFactor') && document.getElementById('includeSlotOpeningFactor').checked == true){
+		if(document.getElementById('includeSkewFactor') && document.getElementById('includeSkewFactor').checked == true){
+			var sourceWindingFactors = skewCorrectedFactors;
+		}else{
+			var sourceWindingFactors = windingFactors;
+		}
+
+		if(document.getElementById('statorDiameter') && document.getElementById('slotOpening')){
+			var diameterValue = document.getElementById('statorDiameter').value;
+			var slotOpeningValue = document.getElementById('slotOpening').value;
+			diameterValue = diameterValue.replace(/,/,'.');
+			slotOpeningValue = slotOpeningValue.replace(/,/,'.');
+		}
+		if(diameterValue != 0 && diameterValue!='' && slotOpeningValue!=0 && slotOpeningValue!='' && !isNaN(diameterValue) && !isNaN(slotOpeningValue)){
+			for(i=0;i<sourceWindingFactors.length;i++){
+				for(y=0;y<sourceWindingFactors[i].length;y++){
+					var slotCorrectedValue = windingFactors[i][y]*(Math.sin((y+1)*slotOpeningValue/diameterValue)/((y+1)*slotOpeningValue/diameterValue));
+					slotCorrectedValue = Math.round(slotCorrectedValue * 100000) / 100000;
+					slotCorrectedFactors[i][y] = slotCorrectedValue;
+					if(document.getElementById('includeSkewFactor') && document.getElementById('includeSkewFactor').checked == true){
+						var slotAndSkewCorrectedValue = sourceWindingFactors[i][y]*(Math.sin((y+1)*slotOpeningValue/diameterValue)/((y+1)*slotOpeningValue/diameterValue));
+						slotAndSkewCorrectedValue = Math.round(slotAndSkewCorrectedValue * 100000) / 100000;
+						combinedCorrectedFactors[i][y] = slotAndSkewCorrectedValue;
+					}
+				}
+			}
+			if(document.getElementById('includeSkewFactor') && document.getElementById('includeSkewFactor').checked == true){
+				drawWindingFactorSpectrum(combinedCorrectedFactors);
+			}else{
+				drawWindingFactorSpectrum(slotCorrectedFactors);
+			}
+			slotOpeningCorrectionEnabled = true;
+		}else{
+			if(diameterValue == 0 || diameterValue =='' || isNaN(diameterValue)){
+				document.getElementById('statorDiameter').value = 0;
+				highlightInvalidInput('statorDiameter');
+			}
+			if(slotOpeningValue ==0 || slotOpeningValue=='' || isNaN(slotOpeningValue)){
+				document.getElementById('slotOpening').value = 0;
+				highlightInvalidInput('slotOpening');
+			}
+			document.getElementById('includeSlotOpeningFactor').checked = false;
+			if(document.getElementById('includeSkewFactor') && document.getElementById('includeSkewFactor').checked == true){
+				drawWindingFactorSpectrum(skewCorrectedFactors);
+			}else{
+				drawWindingFactorSpectrum(windingFactors);
+			}
+			slotOpeningCorrectionEnabled = false;
+		}
+	}else{
+		if(document.getElementById('includeSkewFactor') && document.getElementById('includeSkewFactor').checked == true){
+			drawWindingFactorSpectrum(skewCorrectedFactors);
+		}else{
+			drawWindingFactorSpectrum(windingFactors);
+		}
+		slotOpeningCorrectionEnabled = false;
+	}
+}
+
+function updateSkewFactor(){
+	if(document.getElementById('includeSkewFactor') && document.getElementById('includeSkewFactor').checked == true){
+		if(document.getElementById('includeSlotOpeningFactor') && document.getElementById('includeSlotOpeningFactor').checked == true){
+			var sourceWindingFactors = slotCorrectedFactors;
+		}else{
+			var sourceWindingFactors = windingFactors;
+		}
+
+		if(document.getElementById('slotSkew')){
+			var skewValue = document.getElementById('slotSkew').value;
+			skewValue = skewValue.replace(/,/,'.');
+		}
+		if(skewValue != 0 && skewValue!='' && !isNaN(skewValue)){
+			for(i=0;i<sourceWindingFactors.length;i++){
+				for(y=0;y<sourceWindingFactors[i].length;y++){ //sin(z*pi*i/2/N1) / (z*pi*i/2/N1)
+					var skewCorrectedValue = windingFactors[i][y]*(Math.sin(skewValue*Math.PI*(y+1)/calculatedSlots) / (skewValue*Math.PI*(y+1)/calculatedSlots));
+					skewCorrectedValue = Math.round(skewCorrectedValue * 100000) / 100000;
+					skewCorrectedFactors[i][y] = skewCorrectedValue;
+					if(document.getElementById('includeSlotOpeningFactor') && document.getElementById('includeSlotOpeningFactor').checked == true){
+						var skewAndSlotCorrectedValue = sourceWindingFactors[i][y]*(Math.sin(skewValue*Math.PI*(y+1)/calculatedSlots) / (skewValue*Math.PI*(y+1)/calculatedSlots));
+						skewAndSlotCorrectedValue = Math.round(skewAndSlotCorrectedValue * 100000) / 100000;
+						combinedCorrectedFactors[i][y] = skewAndSlotCorrectedValue;
+					}
+				}
+			}
+			if(document.getElementById('includeSlotOpeningFactor') && document.getElementById('includeSlotOpeningFactor').checked == true){
+				drawWindingFactorSpectrum(combinedCorrectedFactors);
+			}else{
+				drawWindingFactorSpectrum(skewCorrectedFactors);
+			}
+			skewCorrectionEnabled=true;
+		}else{
+			document.getElementById('slotSkew').value = 0;
+			document.getElementById('includeSkewFactor').checked = false;
+			highlightInvalidInput('slotSkew');
+			if(document.getElementById('includeSlotOpeningFactor') && document.getElementById('includeSlotOpeningFactor').checked == true){
+				drawWindingFactorSpectrum(slotCorrectedFactors);
+			}else{
+				drawWindingFactorSpectrum(windingFactors);
+			}
+			skewCorrectionEnabled=false;
+		}
+	}else{
+		if(document.getElementById('includeSlotOpeningFactor') && document.getElementById('includeSlotOpeningFactor').checked == true){
+			drawWindingFactorSpectrum(slotCorrectedFactors);
+		}else{
+			drawWindingFactorSpectrum(windingFactors);
+		}
+		skewCorrectionEnabled=false;
+
+	}
+}
+
+
+// Clear any previous coil highlight.
+function resetWindingSteps(){
+    document.getElementById('steps').replaceChildren();
+    document.querySelectorAll('#windingSchemeResult span').forEach(letter=>letter.style.backgroundColor='');
+}
+
+function phaseColor (phaseSymbol) {
+	var phaseWireColor = '#00CA00';
+	phaseSymbol = phaseSymbol.toLowerCase();
+	if(phaseSymbol == '|'){phaseWireColor = '#000000';}
+	if(phaseSymbol == '/'){phaseWireColor = '#000000';}
+	if(phaseSymbol == '-'){phaseWireColor = '#000000';}
+	if(phaseSymbol == 'a'){phaseWireColor = '#EA0000';}
+	if(phaseSymbol == 'b'){phaseWireColor = '#008AE6';}
+	if(phaseSymbol == 'c'){phaseWireColor = '#00CA00';}
+	return phaseWireColor;
+}
+
+
+// Render the stator and its winding.
+
+
+function updateExportFormat() {
+    const format=document.getElementById('exportFormat');
+    if (!format) return;
+    format.querySelector('option[value="svg"]').disabled=windingLayout !== 'linear';
+    format.value=windingLayout === 'linear' ? 'svg' : 'png';
+}
+function windingSVGForExport() {
+    const source=document.querySelector('#linearWinding svg');
+    if (!source) throw new Error('Calculate a winding before saving.');
+    const svg=source.cloneNode(true), box=source.viewBox.baseVal;
+    svg.setAttribute('xmlns','http://www.w3.org/2000/svg');
+    svg.setAttribute('width',box.width);
+    svg.setAttribute('height',box.height);
+    svg.removeAttribute('style');
+    svg.setAttribute('font-family','Arial, sans-serif');
+    const background=document.createElementNS('http://www.w3.org/2000/svg','rect');
+    background.setAttribute('x',box.x);background.setAttribute('y',box.y);
+    background.setAttribute('width',box.width);background.setAttribute('height',box.height);
+    background.setAttribute('fill','white');
+    svg.insertBefore(background,svg.firstChild);
+    return new XMLSerializer().serializeToString(svg);
+}
+function downloadWindingBlob(blob,filename) {
+    const url=URL.createObjectURL(blob), link=document.createElement('a');
+    link.href=url;link.download=filename;
+    document.body.appendChild(link);link.click();link.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),30000);
+}
+async function saveWinding() {
+    const status=document.getElementById('exportStatus');
+    const button=document.getElementById('saveWinding');
+    status.textContent='';button.disabled=true;
+    try {
+        const format=document.getElementById('exportFormat').value;
+        const prefix=`winding-${windingLayout}-${outerStatorMode?'outer':'inner'}-${calculatedSlots}slots-${calculatedPoles}poles${parallelCoilsActive()?'-'+currentConnectionPlan.mode+'-'+currentConnectionPlan.branchCount+'branches':''}`;
+        if (format==='svg') {
+            downloadWindingBlob(new Blob([windingSVGForExport()],{type:'image/svg+xml;charset=utf-8'}),prefix+'.svg');
+        } else {
+            const output=document.createElement('canvas');
+            const ctx=output.getContext('2d');
+            if (windingLayout==='linear') {
+                const svg=windingSVGForExport();
+                const box=document.querySelector('#linearWinding svg').viewBox.baseVal;
+                output.width=Math.ceil(box.width*2);output.height=Math.ceil(box.height*2);
+                const url=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}));
+                try {
+                    const image=new Image();
+                    await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=()=>reject(new Error('Could not render PNG.'));image.src=url;});
+                    ctx.drawImage(image,0,0,output.width,output.height);
+                } finally { URL.revokeObjectURL(url); }
+            } else {
+                const source=document.getElementById('statorCanvas');
+                if (!source) throw new Error('Calculate a winding before saving.');
+                output.width=source.width;output.height=source.height;
+                ctx.fillStyle='white';ctx.fillRect(0,0,output.width,output.height);
+                ctx.drawImage(source,0,0);
+            }
+            const blob=await new Promise(resolve=>output.toBlob(resolve,'image/png'));
+            if (!blob) throw new Error('Could not save PNG.');
+            downloadWindingBlob(blob,prefix+'.png');
+        }
+        status.textContent='Saved '+format.toUpperCase()+'.';
+    } catch(error) { status.textContent=error.message; }
+    finally { button.disabled=false; }
+}
+
+// Electrical connections are independent of the view and of the Y/delta termination.
+var coilConnectionSelection={mode:'series',branches:1};
+var currentConnectionPlan=null;
+function windingGCD(a,b){a=Math.abs(a);b=Math.abs(b);while(b){const remainder=a%b;a=b;b=remainder;}return a;}
+function classifyCoilConnections(slots,poles,layers) {
+    const result={slots,poles,layers,symmetry:1,coilsPerGroup:null,kind:'series',covered:false};
+    if(!Number.isInteger(slots)||slots<3||slots%3||!Number.isInteger(poles)||poles<2||poles%2||![1,2].includes(layers))return {...result,reason:'Use an integer slot count, an even numberOfPoles count, and one or two layers.'};
+    if(layers===1 && slots%6)return {...result,reason:'Single-layer symmetry requires an integer Ns/6.'};
+    result.symmetry=layers===2?windingGCD(slots,poles):windingGCD(windingGCD(slots,poles),slots/6);
+    result.coilsPerGroup=(slots/3)/result.symmetry*(layers/2);
+    if(result.symmetry===1)return {...result,covered:true,reason:'One symmetry group: all coils must be in series.'};
+    if(!Number.isInteger(result.coilsPerGroup)||result.coilsPerGroup<1)return {...result,reason:'The supplied symmetry rules do not cover a fractional number of coils per group.'};
+    result.covered=true;
+    result.kind=result.coilsPerGroup===1?'any':((poles/2)%2===1?'series-antiparallel':'series-parallel');
+    return result;
+}
+function connectionCoils(slots,poles,windingScheme) {
+    let coils,layers,distributed=false;
+    if(typeof distributedWinding==='string' && distributedWinding.includes('|')) {
+        const model=distributedWindingModel(distributedWinding,slots,poles,distributedWinding.split('|').some(slot=>slot.length===2)?Number(coilShorteningSlots):0);
+        distributed=true;layers=model.layers;
+        coils=model.coils.map(c=>({...c,id:`D:${c.fromSlot}:${c.fromLayer}`,slot:c.fromSlot,polarity:c.symbol===c.symbol.toUpperCase()?1:-1,shape:`${c.fromLayer}:${c.toLayer}:${c.span}`}));
+    } else {
+        coils=windingScheme.replace(/\//g,'').split('').flatMap((symbol,slot)=>/^[ABCabc]$/.test(symbol)?[{id:`C:${slot}`,slot,phase:symbol.toLowerCase(),symbol,polarity:symbol===symbol.toUpperCase()?1:-1,shape:'tooth'}]:[]);
+        layers=coils.length===slots?2:coils.length*2===slots?1:0;
+    }
+    const k=2*Math.PI*(poles/2)/slots;
+    for(const coil of coils) {
+        const a=k*coil.slot;
+        let real=Math.cos(a),imag=Math.sin(a);
+        if(distributed){real-=Math.cos(k*coil.toSlot);imag-=Math.sin(k*coil.toSlot);}
+        coil.emf={real:real*coil.polarity,imag:imag*coil.polarity};
+    }
+    return {slots,poles,layers,distributed,coils};
+}
+function addCoilEMFs(coils){return coils.reduce((sum,c)=>({real:sum.real+c.emf.real,imag:sum.imag+c.emf.imag}),{real:0,imag:0});}
+function symmetryCoilModules(model,rule) {
+    if(!rule.covered || !Number.isInteger(rule.coilsPerGroup))throw new Error(rule.reason||'Symmetry grouping is unavailable.');
+    const moduleSlots=model.slots/rule.symmetry,phases={a:[],b:[],c:[]};
+    for(const phase of ['a','b','c']) {
+        const coils=model.coils.filter(c=>c.phase===phase);
+        if(coils.length!==rule.coilsPerGroup*rule.symmetry)throw new Error('The actual phase coil counts do not match the symmetry rule.');
+        for(let index=0;index<rule.symmetry;index++) {
+            const items=coils.filter(c=>Math.floor((c.slot+1e-9)/moduleSlots)===index).sort((a,b)=>a.slot-b.slot);
+            if(items.length!==rule.coilsPerGroup)throw new Error('This slot pattern does not form equally populated symmetry groups.');
+            const reference=phases[phase][0]?.coils || items;
+            let polarity=null;
+            items.forEach((coil,j)=>{
+                const expected=reference[j],relative=coil.slot-index*moduleSlots;
+                if(Math.abs(relative-expected.slot)>1e-7 || coil.shape!==expected.shape)throw new Error('The coil positions or spans are not equivalent across symmetry groups.');
+                const sign=coil.polarity*expected.polarity;
+                if(polarity!==null && polarity!==sign)throw new Error('A symmetry group has inconsistent coil polarity.');
+                polarity=sign;
+            });
+            const emf=addCoilEMFs(items),magnitude=Math.hypot(emf.real,emf.imag);
+            if(magnitude<1e-7)throw new Error('A symmetry group has zero resultant EMF.');
+            phases[phase].push({id:phase.toUpperCase()+'G'+(index+1),index,coils:items,referencePolarity:polarity,emf,
+                // Reference S/E follows the first geometric group. Opposite
+                // groups are traversed E -> S to retain the phase polarity.
+                referenceItems:polarity<0?items.slice().reverse().map(c=>({coilId:c.id,sense:-1})):items.map(c=>({coilId:c.id,sense:1})),
+                correction:polarity<0?-1:1});
+        }
+    }
+    return phases;
+}
+function buildCoilConnectionPlan(model,mode='series',branchCount=1) {
+    const rule=classifyCoilConnections(model.slots,model.poles,model.layers);
+    const plan={mode,branchCount,rule,model,phases:{a:[],b:[],c:[]},branchByCoil:{}};
+    if(mode==='series') {
+        for(const phase of ['a','b','c'])plan.phases[phase]=[{id:phase.toUpperCase()+'1',items:model.coils.filter(c=>c.phase===phase).map(c=>({coilId:c.id,sense:1})),modules:[],emf:addCoilEMFs(model.coils.filter(c=>c.phase===phase))}];
+        plan.branchCount=1;
+    } else {
+        if(!rule.covered || rule.symmetry===1)throw new Error(rule.reason||'This winding must remain in series.');
+        if(!Number.isInteger(branchCount)||branchCount<2||rule.symmetry%branchCount)throw new Error('Parallel branch count must divide the winding symmetry.');
+        if(mode==='parallel' && !(rule.kind==='any' && branchCount===rule.symmetry))throw new Error('Individual coils cannot be directly paralleled for this winding.');
+        if(mode==='series-parallel' && !['any','series-parallel'].includes(rule.kind))throw new Error('This winding requires series/antiparallel group connections.');
+        if(mode==='series-antiparallel' && !['any','series-antiparallel'].includes(rule.kind))throw new Error('Antiparallel groups are not allowed by this winding rule.');
+        if(!['parallel','series-parallel','series-antiparallel'].includes(mode))throw new Error('Unknown coil connection.');
+        const modules=symmetryCoilModules(model,rule),perBranch=rule.symmetry/branchCount;
+        for(const phase of ['a','b','c']) {
+            for(let b=0;b<branchCount;b++) {
+                const block=modules[phase].slice(b*perBranch,(b+1)*perBranch);
+                const items=block.flatMap(group=>group.correction<0?group.referenceItems.slice().reverse().map(item=>({...item,sense:-item.sense})):group.referenceItems.map(item=>({...item})));
+                const coils=items.map(item=>model.coils.find(c=>c.id===item.coilId));
+                plan.phases[phase].push({id:phase.toUpperCase()+(b+1),items,modules:block,emf:addCoilEMFs(coils)});
+            }
+            const reference=plan.phases[phase][0];
+            for(const branch of plan.phases[phase]) {
+                if(branch.items.length!==reference.items.length)throw new Error('Parallel branches must have equal series coil counts.');
+                const difference=Math.hypot(branch.emf.real-reference.emf.real,branch.emf.imag-reference.emf.imag);
+                if(difference>1e-6*Math.max(1,Math.hypot(reference.emf.real,reference.emf.imag)))throw new Error('The oriented branch EMFs do not match; these groups cannot be paralleled.');
+            }
+        }
+    }
+    const used=[];
+    for(const branches of Object.values(plan.phases))for(const branch of branches)for(const item of branch.items){used.push(item.coilId);plan.branchByCoil[item.coilId]=branch.id;}
+    if(used.length!==model.coils.length || new Set(used).size!==model.coils.length)throw new Error('Each coil must appear exactly once in the connection graph.');
+    return plan;
+}
+function coilConnectionChoices(model) {
+    const rule=classifyCoilConnections(model.slots,model.poles,model.layers),choices={series:[1],parallel:[],'series-parallel':[],'series-antiparallel':[]};
+    let reason=rule.reason||'';
+    const modes=rule.kind==='any'?['parallel','series-parallel','series-antiparallel']:[rule.kind];
+    for(const mode of modes.filter(mode=>mode!=='series'))for(let branches=2;branches<=rule.symmetry;branches++) {
+        if(rule.symmetry%branches)continue;
+        if(mode==='parallel' && branches!==rule.symmetry)continue;
+        if(mode==='series-parallel' && model.coils.length/(3*branches)<=1)continue;
+        try{buildCoilConnectionPlan(model,mode,branches);choices[mode].push(branches);}catch(error){if(!reason)reason=error.message;}
+    }
+    return {rule,choices,reason};
+}
+function updateCoilConnectionPlan(slots,poles,windingScheme) {
+    let model;
+    try{model=connectionCoils(Number(slots),Number(poles),windingScheme);}catch(error){currentConnectionPlan=null;document.getElementById('coilConnectionSummary').textContent=error.message;return;}
+    const available=coilConnectionChoices(model),modeSelect=document.getElementById('coilConnectionMode'),branchSelect=document.getElementById('parallelBranches');
+    const previous=coilConnectionSelection.mode;
+    if(!available.choices[coilConnectionSelection.mode]?.length)coilConnectionSelection={mode:'series',branches:1};
+    const choices=available.choices[coilConnectionSelection.mode];
+    if(!choices.includes(coilConnectionSelection.branches))coilConnectionSelection.branches=choices[0];
+    for(const option of modeSelect.options)option.disabled=!available.choices[option.value]?.length;
+    modeSelect.value=coilConnectionSelection.mode;
+    branchSelect.replaceChildren(...choices.map(n=>new Option(String(n),String(n),false,n===coilConnectionSelection.branches)));
+    branchSelect.disabled=coilConnectionSelection.mode==='series'||choices.length===1;
+    currentConnectionPlan=buildCoilConnectionPlan(model,coilConnectionSelection.mode,coilConnectionSelection.branches);
+    const rule=available.rule,parts=[`Symmetry ${rule.symmetry}`,`${model.layers||'?'} layer${model.layers===1?'':'s'}`];
+    if(currentConnectionPlan.branchCount===1)parts.push('All coils in series');
+    else parts.push(`${currentConnectionPlan.branchCount} branches × ${currentConnectionPlan.phases.a[0].items.length} series coils per phase`);
+    if(previous!==coilConnectionSelection.mode)parts.push('Selection reset to series for this winding');
+    if(!Object.entries(available.choices).some(([mode,options])=>mode!=='series'&&options.length))parts.push(available.reason||'Only series is allowed');
+    else if(currentConnectionPlan.mode==='series-antiparallel' && Object.values(currentConnectionPlan.phases).flat().some(branch=>branch.modules.some(group=>group.correction<0)))parts.push('Opposite reference groups use E → S');
+    document.getElementById('coilConnectionSummary').textContent=parts.join(' · ');
+    document.getElementById('symmetryValue').textContent=rule.symmetry;
+    document.getElementById('symmetryGroupCoils').textContent=rule.coilsPerGroup??'—';
+    document.getElementById('coilConnectionControls').hidden=false;
+    updateCoilConnectionDetails(currentConnectionPlan);
+}
+function updateCoilConnectionDetails(plan) {
+    const details=document.getElementById('coilConnectionDetails'),body=details.querySelector('tbody');
+    details.hidden=plan.branchCount===1;body.replaceChildren();
+    if(details.hidden)return;
+    for(const branches of Object.values(plan.phases))for(const branch of branches) {
+        const row=document.createElement('tr');
+        const coils=branch.items.map(item=>plan.model.coils.find(coil=>coil.id===item.coilId));
+        const descriptions=[branch.id,coils.map(c=>plan.model.distributed?`S${c.fromSlot+1}–S${c.toSlot+1}`:String(c.slot+1)).join(' → '),branch.modules.map(group=>`${group.id}: ${group.correction<0?'E → S':'S → E'}`).join('; ')];
+        for(const value of descriptions){const cell=document.createElement('td');cell.textContent=value;cell.style.padding='5px 12px';row.appendChild(cell);}
+        body.appendChild(row);
+    }
+}
+function changeCoilConnections() {
+    coilConnectionSelection={mode:document.getElementById('coilConnectionMode').value,branches:Number(document.getElementById('parallelBranches').value)};
+    if(lastWindingDraw){currentWindingStep=1;if(!distributedWinding)resetWindingSteps();drawStator(lastWindingDraw[0],lastWindingDraw[1],false,lastWindingDraw[3]);}
+}
+function parallelCoilsActive(){return currentConnectionPlan && currentConnectionPlan.branchCount>1;}
+
+var windingLayout = 'linear';
+var lastWindingDraw = null;
+function toggleWindingLayout() {
+    windingLayout = windingLayout === 'linear' ? 'circular' : 'linear';
+    document.getElementById('layoutToggle').textContent = windingLayout === 'linear' ? 'Show circular view' : 'Show linear view';
+    document.getElementById('layoutToggle').setAttribute('aria-pressed',String(windingLayout==='circular'));
+    document.getElementById('statorToggle').disabled=windingLayout==='linear';
+    updateExportFormat();
+    if (lastWindingDraw) drawStator(...lastWindingDraw);
+}
+function drawStator(numberOfSlots,windingScheme,windingStep,phaseConnection) {
+    lastWindingDraw = [numberOfSlots,windingScheme,windingStep,phaseConnection];
+    updateCoilConnectionPlan(numberOfSlots,Number(calculatedPoles),windingScheme);
+    const priorLinear=document.getElementById("linearWinding"); if(priorLinear) priorLinear.remove();
+    drawCircularStator(numberOfSlots,windingScheme,windingStep,phaseConnection);
+    if (windingLayout === 'linear') drawLinearStator(numberOfSlots,windingScheme,windingStep,phaseConnection);
+}
+function parallelLinearTerminalsSVG(groups,complete,connection,width,coilBottom,neutralRow,phaseStride,seriesTop) {
+    const plan=currentConnectionPlan,colors={a:'#e52323',b:'#009de0',c:'#76bc32'},geometry=new Map(Object.values(groups).flat().map(coil=>[coil.id,coil]));
+    const verticals=[],horizontals=[],dots=[],labels=[],stubs={a:[],b:[],c:[]};
+    const line=(x1,y1,x2,animationColumnIndex,color,net,extra='')=>{
+        if(Math.abs(x1-x2)<1e-8)verticals.push({x:x1,top:Math.min(y1,animationColumnIndex),bottom:Math.max(y1,animationColumnIndex),color,net,extra});
+        else horizontals.push({left:Math.min(x1,x2),right:Math.max(x1,x2),y:y1,color,net,extra});
+    };
+    const showLabels=document.getElementById('showBranchLabels').checked;
+    const commonY=neutralRow+215;
+    for(const [p,phase] of ['a','b','c'].entries()) {
+        const color=colors[phase],startY=neutralRow+30+p*22,endY=neutralRow+110+p*22;
+        const starts=[],ends=[];let row=0;
+        for(const branch of plan.phases[phase]) {
+            const items=branch.items.map(item=>geometry.get(item.coilId));
+            for(let j=0;j<items.length-1;j++)if(items[j] && items[j+1]) {
+                const y=seriesTop+p*phaseStride+row++*9,net=branch.id+':'+j;
+                line(items[j].exit,coilBottom,items[j].exit,y,color,net);
+                line(items[j].exit,y,items[j+1].entry,y,color,net,`data-series="${phase.toUpperCase()}" data-branch="${branch.id}"`);
+                line(items[j+1].entry,y,items[j+1].entry,coilBottom,color,net);
+            }
+            const first=items.find(Boolean);
+            if(first && showLabels) {
+                const reversed=branch.modules.filter(module=>module.correction<0).map(module=>module.id);
+                labels.push(`<text x="${first.entry+8}" y="${coilBottom+17+p*12}" font-size="11" fill="${color}" data-branch-label="${branch.id}"><title>${branch.modules.map(m=>m.id+(m.correction<0?' E to S':' S to E')).join(', ')}</title>${branch.id}${reversed.length?' ↶':''}</text>`);
+            }
+            if(!complete || items.some(item=>!item))continue;
+            starts.push(items[0].entry);ends.push(items.at(-1).exit);
+            line(items[0].entry,coilBottom,items[0].entry,startY,color,phase+':start',`data-branch-start="${branch.id}"`);
+            line(items.at(-1).exit,coilBottom,items.at(-1).exit,endY,color,phase+':end',`data-branch-end="${branch.id}"`);
+            dots.push(...[{x:items[0].entry,y:startY},{x:items.at(-1).exit,y:endY}].map(point=>({...point,color})));
+        }
+        if(complete && starts.length) {
+            line(Math.min(...starts),startY,Math.max(...starts),startY,color,phase+':start',`data-phase-start-bus="${phase}"`);
+            line(Math.min(...ends),endY,Math.max(...ends),endY,color,phase+':end',`data-phase-end-bus="${phase}"`);
+            line(starts[0],startY,starts[0],commonY,color,phase+':start');
+            line(ends.at(-1),endY,ends.at(-1),commonY,color,phase+':end');
+            stubs[phase]=[{entry:starts[0],exit:ends.at(-1)}];
+        }
+    }
+    let svg=`<g data-connection-mode="${plan.mode}" data-parallel-branches="${plan.branchCount}">`;
+    for(const v of verticals)svg+=`<path d="M${v.x} ${v.top}V${v.bottom}" stroke="${v.color}" stroke-width="2" fill="none" ${v.extra}/>`;
+    for(const h of horizontals) {
+        const crossings=[...new Set(verticals.filter(v=>v.net!==h.net && v.x>h.left+5 && v.x<h.right-5 && v.top<h.y-3 && v.bottom>h.y+3).map(v=>v.x))].sort((a,b)=>a-b);
+        let d=`M${h.left} ${h.y}`;
+        for(const x of crossings)d+=`H${x-4}Q${x} ${h.y-8} ${x+4} ${h.y}`;
+        d+=`H${h.right}`;
+        svg+=`<path d="${d}" stroke="white" stroke-width="5" fill="none"/><path d="${d}" stroke="${h.color}" stroke-width="2" fill="none" ${h.extra}/>`;
+    }
+    for(const dot of dots)svg+=`<circle cx="${dot.x}" cy="${dot.y}" r="3" fill="${dot.color}"/>`;
+    svg+=labels.join('')+'</g>';
+    if(complete)svg+=linearWindingTerminalsSVG(stubs,true,connection,width,commonY,commonY+20,44,commonY+5,false);
+    return svg;
+}
+function parallelCircularLayout(count,plan) {
+    const edges=[],coils=new Map(plan.model.coils.map(c=>[c.id,c])),slot=2*Math.PI/count;
+    const conductorIndex=(coil,entry)=>{
+        const source=(coil.polarity>0)===entry;
+        return (source?coil.fromSlot:coil.toSlot)+.5+((source?coil.fromLayer:coil.toLayer)===0?-.025:.025)/slot;
+    };
+    for(const phase of ['a','b','c'])for(const branch of plan.phases[phase])for(let j=0;j<branch.items.length-1;j++) {
+        const from=coils.get(branch.items[j].coilId),to=coils.get(branch.items[j+1].coilId);
+        const edge={phase,branch:branch.id,fromId:from.id,toId:to.id,
+            fromIndex:plan.model.distributed?conductorIndex(from,false):from.slot,
+            toIndex:plan.model.distributed?conductorIndex(to,true):to.slot,
+            fromSign:plan.model.distributed?0:from.polarity,toSign:plan.model.distributed?0:-to.polarity};
+        if(plan.model.distributed && (edge.toIndex-edge.fromIndex+count)%count>count/2){
+            [edge.fromIndex,edge.toIndex]=[edge.toIndex,edge.fromIndex];edge.reverseTrack=true;
+        }
+        edges.push(edge);
+    }
+    // Use the approved angular packing, omitting connections between branches.
+    const layout=circularBackironLayout(count,'',edges);
+    return {...layout,edges:layout.routes,externalTerminalRadius:layout.terminalRadius+125,
+        center:Math.max(500,Math.ceil(layout.terminalRadius+300))};
+}
+function drawParallelCircularWinding(ctx,canvas,count,windingScheme,step,connection,toothWidth,toothHeight) {
+    const plan=currentConnectionPlan,layout=canvas.circularLayout,center=canvas.width/2,slot=2*Math.PI/count,active=Math.min(count,step||count+1),complete=active===count;
+    const rotation=-Math.PI/2-((step||count+1)-1)*slot,wireWidth=layout.wireWidth,colors={a:'#EA0000',b:'#008AE6',c:'#00CA00'},geometry=new Map();
+    const point=(r,a)=>({x:center+r*Math.cos(a),y:center+r*Math.sin(a),axis:a});
+    const angle=p=>Math.atan2(p.y-center,p.x-center);
+    const map=(x,y,a)=>{const r=outerStatorMode?412-x:x+layout.toothShift;return {x:center+r*Math.cos(a)-y*Math.sin(a),y:center+r*Math.sin(a)+y*Math.cos(a)};};
+    function stroke(color,width=wireWidth){ctx.strokeStyle=color;ctx.lineWidth=width;ctx.stroke();}
+    function leadToTrack(lead,r,color) {
+        const cos=Math.cos(lead.axis),sin=Math.sin(lead.axis),x=(lead.from.x-center)*cos+(lead.from.y-center)*sin;
+        const y=lead.offset,tx=Math.sqrt(Math.max(0,r*r-y*y));
+        const to={x:center+tx*cos-y*sin,y:center+tx*sin+y*cos,axis:lead.axis};
+        ctx.beginPath();ctx.moveTo(lead.from.x,lead.from.y);ctx.lineTo(center+x*cos-y*sin,center+x*sin+y*cos);ctx.lineTo(to.x,to.y);stroke(color);
+        return to;
+    }
+    ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.lineJoin='round';ctx.lineCap='round';
+    canvas.windingWireWidth=wireWidth;canvas.phaseBranchTerminals={a:[],b:[],c:[]};
+    const half=toothWidth/4,side=half+wireWidth/2;
+    for(let i=0;i<count;i++) {
+        const p=point(outerStatorMode?412-toothHeight-31:toothHeight+12+layout.toothShift,rotation+i*slot);
+        ctx.font='12px Arial';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillStyle='#222';ctx.fillText(String(i+1),p.x,p.y);
+    }
+    for(const coil of plan.model.coils) {
+        if(coil.slot>=active)continue;
+        const a=rotation+coil.slot*slot,color=colors[coil.phase],forward=coil.polarity>0;
+        let entry,exit;
+        if(!plan.model.distributed) {
+            ctx.beginPath();for(let turn=0;turn<5;turn++) {
+                const from=map((forward?156:171)+turn*15,side,a),to=map((forward?171:156)+turn*15,-side,a);
+                ctx.moveTo(from.x,from.y);ctx.lineTo(to.x,to.y);
+            }stroke(color);
+            const sign=forward?-1:1;
+            entry={from:map(156,sign*side,a),axis:a,offset:sign*layout.leadGap};
+            exit={from:map(231,-sign*side,a),axis:a,offset:-sign*layout.leadGap};
+        } else {
+            const conductor=(index,layer)=>{
+                const r=outerStatorMode?412-(layer?222:170):(layer?222:170)+layout.toothShift;
+                return point(r,rotation+(index+.5)*slot+(layer===0?-.025:.025));
+            };
+            const from=conductor(coil.fromSlot,coil.fromLayer),to=conductor(coil.toSlot,coil.toLayer);
+            const endTurnRadius=outerStatorMode?layout.inner-9-(coil.fromSlot%3)*4:layout.outer+9+(coil.fromSlot%3)*4;
+            const a1=angle(from),a2=angle(to);let sweep=(a2-a1+3*Math.PI)%(2*Math.PI)-Math.PI;
+            ctx.beginPath();ctx.moveTo(from.x,from.y);let q=point(endTurnRadius,a1);ctx.lineTo(q.x,q.y);ctx.arc(center,center,endTurnRadius,a1,a1+sweep,sweep<0);ctx.lineTo(to.x,to.y);stroke(color,Math.max(.7,wireWidth*.7));
+            for(const [p,letter] of [[from,coil.symbol],[to,coil.symbol===coil.symbol.toUpperCase()?coil.symbol.toLowerCase():coil.symbol.toUpperCase()]]) {
+                ctx.beginPath();ctx.arc(p.x,p.y,6,0,2*Math.PI);ctx.fillStyle='white';ctx.fill();stroke(color,1.5);
+                ctx.font='9px Arial';ctx.fillStyle=color;ctx.fillText(letter===letter.toUpperCase()?'+':'−',p.x,p.y);
+            }
+            const start=forward?from:to,end=forward?to:from;
+            entry={from:start,axis:angle(start),offset:0};exit={from:end,axis:angle(end),offset:0};
+        }
+        geometry.set(coil.id,{entry,exit,coil});
+    }
+    for(const edge of layout.edges) {
+        const from=geometry.get(edge.fromId),to=geometry.get(edge.toId);if(!from||!to)continue;
+        const a=leadToTrack(edge.reverseTrack?to.entry:from.exit,edge.startRadius,colors[edge.phase]),b=leadToTrack(edge.reverseTrack?from.exit:to.entry,edge.endRadius,colors[edge.phase]);
+        ctx.beginPath();ctx.moveTo(a.x,a.y);
+        for(const segment of edge.segments) {
+            if(segment.type==='arc')ctx.arc(center,center,segment.radius,rotation+segment.start,rotation+segment.end,false);
+            else for(const sample of segment.points){const p=point(sample.radius,rotation+sample.angle);ctx.lineTo(p.x,p.y);}
+        }
+        ctx.lineTo(b.x,b.y);stroke(colors[edge.phase]);
+    }
+    for(const phase of ['a','b','c'])for(const branch of plan.phases[phase]) {
+        const first=geometry.get(branch.items[0].coilId),last=geometry.get(branch.items.at(-1).coilId);
+        if(first && document.getElementById('showBranchLabels').checked) {
+            const p=first.entry.from;ctx.font='11px Arial';ctx.lineWidth=4;ctx.strokeStyle='white';ctx.strokeText(branch.id,p.x+8,p.y-10);ctx.fillStyle=colors[phase];ctx.fillText(branch.id,p.x+8,p.y-10);
+        }
+        if(!complete||!first||!last)continue;
+        const start=leadToTrack(first.entry,layout.terminalRadius,colors[phase]),end=leadToTrack(last.exit,layout.terminalRadius,colors[phase]);
+        canvas.phaseBranchTerminals[phase].push({id:branch.id,start,end,reversed:branch.modules.some(module=>module.correction<0)});
+    }
+    canvas.dataset.connectionMode=plan.mode;canvas.dataset.parallelBranches=String(plan.branchCount);
+    ctx.restore();
+    if(complete)decorateParallelCircularBuses(canvas,connection);
+}
+function decorateParallelCircularBuses(canvas,connection) {
+    const ctx=canvas.getContext('2d'),layout=canvas.circularLayout,center=canvas.width/2,wire=canvas.windingWireWidth,colors={a:'#EA0000',b:'#008AE6',c:'#00CA00'};
+    const buses=[],junctions=[];
+    const angle=p=>Math.atan2(p.y-center,p.x-center),point=(r,a)=>({x:center+r*Math.cos(a),y:center+r*Math.sin(a),axis:a});
+    function extend(terminal,r){const a=terminal.axis,dx=Math.cos(a),dy=Math.sin(a),x=terminal.x-center,y=terminal.y-center,projection=x*dx+y*dy,t=-projection+Math.sqrt(Math.max(0,projection*projection+r*r-x*x-y*y));return {x:terminal.x+t*dx,y:terminal.y+t*dy,axis:a};}
+    function segment(from,to,color){ctx.beginPath();ctx.moveTo(from.x,from.y);ctx.lineTo(to.x,to.y);ctx.strokeStyle=color;ctx.lineWidth=wire;ctx.stroke();}
+    function bus(points,r,color) {
+        const angles=points.map(p=>(angle(p)+2*Math.PI)%(2*Math.PI)).sort((a,b)=>a-b);
+        if(angles.length<2)return;
+        let gap=-1,index=0;angles.forEach((a,i)=>{const d=angles[(i+1)%angles.length]+(i===angles.length-1?2*Math.PI:0)-a;if(d>gap){gap=d;index=i;}});
+        const start=angles[(index+1)%angles.length],end=start+2*Math.PI-gap;
+        const path=new Path2D(),p=point(r,start);path.moveTo(p.x,p.y);path.arc(center,center,r,start,end,false);
+        buses.push({path,color});
+    }
+    function drawBuses(){for(const {path,color} of buses.splice(0)){ctx.strokeStyle='white';ctx.lineWidth=wire+4;ctx.stroke(path);ctx.strokeStyle=color;ctx.lineWidth=wire;ctx.stroke(path);}}
+    ctx.save();ctx.setTransform(1,0,0,1,0,0);ctx.lineCap='round';ctx.lineJoin='round';
+    for(const [p,phase] of ['a','b','c'].entries()) {
+        const branches=canvas.phaseBranchTerminals[phase],color=colors[phase],starts=[],ends=[];
+        const startR=layout.terminalRadius+20+p*12,endR=layout.terminalRadius+65+p*12;
+        for(const branch of branches) {
+            const start=extend(branch.start,startR),end=extend(branch.end,endR);
+            segment(branch.start,start,color);segment(branch.end,end,color);starts.push(start);ends.push(end);
+        }
+        bus(starts,startR,color);bus(ends,endR,color);
+        junctions.push(...[...starts,...ends].map(point=>({...point,color})));
+        if(!branches.length)continue;
+        const start=extend(branches[0].start,layout.externalTerminalRadius),end=extend(branches.at(-1).end,layout.externalTerminalRadius);
+        segment(starts[0],start,color);segment(ends.at(-1),end,color);
+        canvas.windingTerminals['start-'+phase]=start;canvas.windingTerminals['end-'+phase]=end;
+    }
+    // Draw bus crossings after every lead, then mark only actual junctions.
+    drawBuses();
+    for(const p of junctions){ctx.beginPath();ctx.arc(p.x,p.y,Math.max(2,wire),0,2*Math.PI);ctx.fillStyle=p.color;ctx.fill();}
+    if(connection==='Y') {
+        const ends=['a','b','c'].map(p=>canvas.windingTerminals['end-'+p]).filter(Boolean),r=layout.externalTerminalRadius+35;
+        const points=ends.map(p=>extend(p,r));points.forEach((p,i)=>segment(ends[i],p,'#777'));bus(points,r,'#777');drawBuses();
+        for(const p of points){ctx.beginPath();ctx.arc(p.x,p.y,Math.max(2,wire),0,2*Math.PI);ctx.fillStyle='#777';ctx.fill();}
+        if(points.length){const n=extend(points[0],r+20);segment(points[0],n,'#777');ctx.font='bold 17px Arial';ctx.fillStyle='#222';ctx.textAlign='center';ctx.fillText('N',n.x,n.y+18);canvas.dataset.neutralLabel='N';}
+    }
+    ctx.restore();decorateCircularTerminals(canvas,connection,true);
+}
+
+function linearWindingTerminalsSVG(groups,complete,phaseConnection,width,coilBottom,neutralRow,phaseStride,seriesTop=366,useBranchPlan=true) {
+    if(useBranchPlan && parallelCoilsActive())return parallelLinearTerminalsSVG(groups,complete,phaseConnection,width,coilBottom,neutralRow,phaseStride,seriesTop);
+    let svg='';
+    const text = (x,y,label,size=15,anchor='middle',fill='#222') => `<text x="${x}" y="${y}" font-size="${size}" text-anchor="${anchor}" fill="${fill}">${label}</text>`;
+    const path = (points,color,extra='') => `<path d="${points}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" ${extra}/>`;
+    const colors = {a:'#e52323',b:'#009de0',c:'#76bc32'};
+        const phases=['a','b','c'];
+        const terminalY=neutralRow+40, neutralY=neutralRow;
+        phases.forEach((phase,p) => {
+            const coils=groups[phase];
+            if (!coils.length) return;
+            const color=colors[phase], lane=seriesTop+p*phaseStride;
+            for (let j=0;j<coils.length-1;j++) {
+                svg += path(`M${coils[j].exit} ${coilBottom}V${lane+j*9}H${coils[j+1].entry}V${coilBottom}`,color,`data-series="${phase.toUpperCase()}"`);
+            }
+            const first=coils[0],last=coils[coils.length-1];
+            const inputX=first.entry;
+            svg += path(`M${inputX} ${coilBottom}V${terminalY}`,color,`data-terminal="phase-${phase}"`);
+            svg += text(inputX+11,terminalY+25,(phaseConnection==='Y'?'Phase ':'Start ')+phase.toUpperCase(),18,'start');
+            if (!complete) {
+                svg += path(`M${last.exit} ${coilBottom}V${lane+10}`,color);
+                svg += text(last.exit,lane+26,'Next '+phase.toUpperCase(),12);
+            } else if (phaseConnection==='Y') {
+                svg += path(`M${last.exit} ${coilBottom}V${neutralY}`,color,`data-neutral="${phase}"`);
+                svg += `<circle cx="${last.exit}" cy="${neutralY}" r="4" fill="#222"/>`;
+            } else {
+                // Leave delta winding ends available rather than drawing a junction network.
+                svg += path(`M${last.exit} ${coilBottom}V${terminalY}`,color,`data-end="${phase}"`);
+                svg += text(last.exit+11,terminalY+25,'End '+phase.toUpperCase(),18,'start');
+
+            }
+        });
+        if (complete && phaseConnection!=='Y' && phases.every(phase=>groups[phase].length)) {
+            // Pairings are supplied explicitly so the electrical connections are reviewable.
+            const pairs = [['a','c'],['b','a'],['c','b']];
+            const labelY=terminalY+185;
+            const routes=pairs.map(([start,end],i)=>({
+                start,end,x1:groups[start][0].entry,x2:groups[end].at(-1).exit,
+                y:terminalY+55+i*42
+            }));
+            const verticals=routes.flatMap(route=>[
+                {x:route.x1,top:terminalY,bottom:labelY-12},
+                {x:route.x2,top:terminalY,bottom:route.y}
+            ]);
+            // Draw overpasses at crossings; only the three line taps have junction dots.
+            routes.forEach((route,i)=>{
+                const left=Math.min(route.x1,route.x2),right=Math.max(route.x1,route.x2);
+                const crossings=[...new Set(verticals.filter(v=>v.x>left+7 && v.x<right-7 && v.top<route.y && v.bottom>route.y).map(v=>v.x))].sort((a,b)=>a-b);
+                let d=`M${left} ${route.y}`;
+                for(const x of crossings) d+=`H${x-5}Q${x} ${route.y-10} ${x+5} ${route.y}`;
+                d+=`H${right}`;
+                svg+=path(`M${route.x1} ${terminalY}V${labelY-12}`,'#111',`data-line-lead="${route.start}"`);
+                svg+=path(`M${route.x2} ${terminalY}V${route.y}`,'#111');
+                // A white under-stroke keeps bridge humps clear of crossing wires.
+                svg+=`<path d="${d}" fill="none" stroke="white" stroke-width="6"/>`;
+                svg+=path(d,'#111',`data-delta-jumper="${route.start}-${route.end}"`);
+                svg+=`<circle cx="${route.x1}" cy="${route.y}" r="3.5" fill="#111" data-line-junction="${route.start}"/>`;
+                svg+=text(route.x1,labelY+12,'Line '+route.start.toUpperCase(),19);
+            });
+        }
+        if (complete && phaseConnection==='Y') {
+            const ends=phases.flatMap(phase=>groups[phase].length?[groups[phase].at(-1).exit]:[]);
+            if (ends.length) {
+                const neutralX=width-65;
+                svg += path(`M${Math.min(...ends)} ${neutralY}H${neutralX}V${terminalY}`,'#222','data-neutral-bus="true"');
+                svg += `<circle cx="${neutralX}" cy="${neutralY}" r="5" fill="#222"/>`;
+                svg += text(neutralX,terminalY+25,'N',19);
+            }
+        }
+    return svg;
+}
+
+
+// Minimum-cost pairing keeps every slot conductor in exactly one coil,
+// including fractional-slot layouts where the nominal span is not an integer.
+function minimumWindingAssignment(cost) {
+    const n=cost.length,u=Array(n+1).fill(0),v=Array(n+1).fill(0),p=Array(n+1).fill(0),way=Array(n+1).fill(0);
+    for(let i=1;i<=n;i++) {
+        p[0]=i;let j0=0;
+        const min=Array(n+1).fill(Infinity),used=Array(n+1).fill(false);
+        do {
+            used[j0]=true;const i0=p[j0];let delta=Infinity,j1=0;
+            for(let j=1;j<=n;j++)if(!used[j]) {
+                const candidate=cost[i0-1][j-1]-u[i0]-v[j];
+                if(candidate<min[j]){min[j]=candidate;way[j]=j0;}
+                if(min[j]<delta){delta=min[j];j1=j;}
+            }
+            for(let j=0;j<=n;j++)if(used[j]){u[p[j]]+=delta;v[j]-=delta;}else min[j]-=delta;
+            j0=j1;
+        }while(p[j0]!==0);
+        do{const j1=way[j0];p[j0]=p[j1];j0=j1;}while(j0!==0);
+    }
+    const result=Array(n);for(let j=1;j<=n;j++)result[p[j]-1]=j-1;
+    return result;
+}
+function distributedWindingModel(slotPattern,count,poles,shortening=0) {
+    const slots=slotPattern.split('|');if(slots.at(-1)==='')slots.pop();
+    if(slots.length!==count || slots.some(s=>!/^[-ABCabc]{1,2}$/.test(s)))throw new Error('The slot-layer pattern is incomplete.');
+    const layers=slots.some(s=>s.length===2)?2:1;
+    if(slots.some(s=>s.length!==layers))throw new Error('Each slot must have the same number of conductor layers.');
+    const polePitch=count/poles,nominalPitch=polePitch-Number(shortening),q=count/(3*poles);
+    if(!(nominalPitch>0 && nominalPitch<count))throw new Error('Shortening must leave a positive coil span.');
+    const coils=[];
+    for(const phase of ['a','b','c'])for(const uppercase of (layers===2?[true,false]:[true])) {
+        const letter=uppercase?phase.toUpperCase():phase;
+        const opposite=uppercase?phase:phase.toUpperCase();
+        const sources=[],targets=[];
+        slots.forEach((slot,i)=>{
+            if(slot[layers-1]===letter)sources.push(i);
+            if(slot[0]===opposite)targets.push(i);
+        });
+        if(sources.length!==targets.length)throw new Error('The slot pattern has unbalanced opposite-polarity conductors for phase '+phase.toUpperCase()+'.');
+        const desired=sources.map(source=>{
+            if(layers===1 && Number.isInteger(q) && q%2===0) {
+                let start=source;
+                for(let i=0;i<count-1 && slots[(start-1+count)%count][0]===letter;i++)start=(start-1+count)%count;
+                const position=(source-start+count)%count;
+                return nominalPitch+q-1-2*position;
+            }
+            return nominalPitch;
+        });
+        const assignment=minimumWindingAssignment(sources.map((source,i)=>targets.map(target=>{
+            const span=(target-source+count)%count;
+            return (span-desired[i])**2+(span===0?count*count:0);
+        })));
+        sources.forEach((source,i)=>{
+            const target=targets[assignment[i]];
+            coils.push({phase,symbol:letter,fromSlot:source,fromLayer:layers-1,toSlot:target,toLayer:0,span:(target-source+count)%count});
+        });
+    }
+    coils.sort((a,b)=>a.fromSlot-b.fromSlot || a.phase.localeCompare(b.phase));
+    return {slots,layers,coils,polePitch,nominalPitch,q};
+}
+function drawDistributedLinearStator(box,count,step,connection) {
+    let model;
+    try{model=distributedWindingModel(distributedWinding,count,Number(calculatedPoles),distributedWinding.split('|').some(slot=>slot.length===2)?Number(coilShorteningSlots):0);}
+    catch(error){box.textContent=error.message;return;}
+    const pitch=70,margin=70,width=Math.max(920,2*margin+count*pitch);
+    const colors={a:'#e52323',b:'#009de0',c:'#76bc32'};
+    const slotX=(i,layer)=>margin+i*pitch+(model.layers===2?(layer===0?-7:7):0);
+    const leftEdge=margin-35,rightEdge=width-margin+35;
+    const rows=[];
+    for(const coil of model.coils) {
+        coil.fromX=slotX(coil.fromSlot,coil.fromLayer);coil.toX=slotX(coil.toSlot,coil.toLayer);
+        coil.wraps=coil.toSlot<coil.fromSlot;
+        const intervals=coil.wraps?[[coil.fromX,rightEdge],[leftEdge,coil.toX]]:[[Math.min(coil.fromX,coil.toX),Math.max(coil.fromX,coil.toX)]];
+        let row=0;
+        while(rows[row]?.some(previous=>intervals.some(range=>range[0]<=previous[1]+8 && previous[0]<=range[1]+8)))row++;
+        if(!rows[row])rows[row]=[];rows[row].push(...intervals);coil.row=row;
+    }
+    const top=70+rows.length*12,bottom=top+196,coilBottom=bottom+18;
+    const groups={a:[],b:[],c:[]},active=step?Math.min(count,step):count,complete=active===count;
+    const maxCoils=Math.max(...['a','b','c'].map(p=>model.coils.filter(c=>c.phase===p).length));
+    const phaseStride=Math.max(44,maxCoils*9+14),seriesTop=coilBottom+35;
+    const neutralRow=seriesTop+3*phaseStride+20;
+    const height=neutralRow+(connection==='Y'?85:260)+(parallelCoilsActive()?320:0);
+    const text=(x,y,value,size=13,fill='#222',anchor='middle')=>`<text x="${x}" y="${y}" font-family="Arial, sans-serif" font-size="${size}" text-anchor="${anchor}" fill="${fill}">${value}</text>`;
+    const path=(d,color,extra='')=>`<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" ${extra}/>`;
+    let svg=`<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Linear distributed winding diagram" data-distributed="true" data-layers="${model.layers}" data-nominal-pitch="${model.nominalPitch}" viewBox="0 25 ${width} ${height-25}" width="${width}" height="${height}" style="display:block;width:100%;min-width:${Math.max(680,count*36)}px;height:auto;font-family:Arial,sans-serif"><defs>`;
+    for(const phase of ['a','b','c'])svg+=`<marker id="arrow-${phase}" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L8 4L0 8Z" fill="${colors[phase]}"/></marker>`;
+    svg+='</defs>';
+    for(let i=0;i<count;i++) {
+        const x=margin+i*pitch;
+        svg+=`<g data-tooth="${i+1}"><rect x="${x+19}" y="${top}" width="${pitch-38}" height="196" fill="#888" stroke="#34434b" stroke-width="1.5"/>${text(x+pitch/2,top+103,i+1,13,'white')}</g>`;
+        svg+=text(x,top-8,'S'+(i+1),11);
+    }
+    const phaseIds={a:0,b:0,c:0};
+    for(const coil of model.coils) {
+        const tag=coil.phase.toUpperCase()+(++phaseIds[coil.phase]);
+        if(coil.fromSlot>=active)continue;
+        const color=colors[coil.phase],y=top-25-coil.row*12;
+        const forward=coil.symbol!==coil.symbol.toLowerCase();
+        const entry=forward?coil.fromX:coil.toX,exit=forward?coil.toX:coil.fromX;
+        groups[coil.phase].push({entry,exit,index:coil.fromSlot,symbol:coil.symbol,id:`D:${coil.fromSlot}:${coil.fromLayer}`});
+        const attributes=`data-coil="${tag}" data-phase="${coil.phase.toUpperCase()}" data-from-slot="${coil.fromSlot+1}" data-from-layer="${coil.fromLayer}" data-to-slot="${coil.toSlot+1}" data-to-layer="${coil.toLayer}" data-span="${coil.span}"`;
+        if(coil.wraps) {
+            svg+=path(`M${coil.fromX} ${coilBottom}V${y}H${rightEdge}M${leftEdge} ${y}H${coil.toX}V${coilBottom}`,color,attributes+' data-wrap="true"');
+            svg+=text(leftEdge-4,y+4,tag,10,color,'end')+text(rightEdge+4,y+4,tag,10,color,'start');
+        } else svg+=path(`M${coil.fromX} ${coilBottom}V${y}H${coil.toX}V${coilBottom}`,color,attributes);
+        for(const [slot,layer,x] of [[coil.fromSlot,coil.fromLayer,coil.fromX],[coil.toSlot,coil.toLayer,coil.toX]]) {
+            const letter=model.slots[slot][layer],up=letter!==letter.toLowerCase(),mid=(top+bottom)/2;
+            svg+=path(`M${x} ${mid+(up?14:-14)}V${mid+(up?-14:14)}`,color,`marker-end="url(#arrow-${coil.phase})" data-conductor="${slot+1}-${layer}" data-symbol="${letter}"`);
+        }
+    }
+    svg+=linearWindingTerminalsSVG(groups,complete,connection,width,coilBottom,neutralRow,phaseStride,seriesTop);
+    box.innerHTML=svg+'</svg>';
+}
+
+function drawLinearStator(numberOfSlots,windingScheme,windingStep,phaseConnection) {
+    const container = document.getElementById('windingCanvasContainer');
+    const canvas = document.getElementById('statorCanvas');
+    canvas.style.display = 'none';
+    const old = document.getElementById('linearWinding');
+    if (old) old.remove();
+    const box = document.createElement('div');
+    box.id = 'linearWinding';
+    box.style.cssText = 'overflow-x:auto;background:white;padding:14px 0;';
+    container.appendChild(box);
+    const distributed = typeof distributedWinding === 'string' && distributedWinding.includes('|');
+    if(distributed){drawDistributedLinearStator(box,Number(numberOfSlots),windingStep,phaseConnection);return;}
+    const symbols = windingScheme.replace(/\//g,'').split('');
+    const count = Number(numberOfSlots), pitch = 86, margin = 70;
+    const width = Math.max(920,margin*2+count*pitch);
+    const phaseStride = Math.max(44, Math.ceil(count/3)*9+16);
+    const neutralRow = 366+3*phaseStride+20;
+    const height = neutralRow+(phaseConnection==='Y'?85:260)+(parallelCoilsActive()?320:0);
+    const top = 110, bottom = 306, coilTop = 88, coilBottom = 326;
+    const activeCount = windingStep ? Math.min(count,windingStep) : count;
+    const complete = activeCount >= count;
+    const groups = {a:[],b:[],c:[]};
+    const colors = {a:'#e52323',b:'#009de0',c:'#76bc32'};
+    let svg = `<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Linear stator winding diagram" viewBox="0 60 ${width} ${height-60}" width="${width}" height="${height}" style="display:block;width:100%;min-width:${Math.max(680,count*48)}px;height:auto;font-family:Arial,sans-serif">`;
+    svg += '<defs>';
+    for (const phase of ['a','b','c']) svg += `<marker id="arrow-${phase}" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L8 4L0 8Z" fill="${colors[phase]}"/></marker>`;
+    svg += '</defs>';
+    const text = (x,y,label,size=15,anchor='middle',fill='#222') => `<text x="${x}" y="${y}" font-size="${size}" text-anchor="${anchor}" fill="${fill}">${label}</text>`;
+    const path = (points,color,extra='') => `<path d="${points}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" ${extra}/>`;
+
+    for (let i=0;i<count;i++) {
+        const x=margin+i*pitch+22, left=x-25, right=x+25;
+        svg += `<g data-tooth="${i+1}"><rect x="${x-16}" y="${top}" width="32" height="${bottom-top}" fill="#888" stroke="#34434b" stroke-width="1.5"/>`;
+        svg += text(x,(top+bottom)/2+5,i+1,14,'middle','white');
+        const symbol=symbols[i] || '-';
+        if (colors[symbol.toLowerCase()] && i<activeCount) {
+            const phase=symbol.toLowerCase(), forward=symbol!==phase;
+            const entry=forward?left:right, exit=forward?right:left;
+            groups[phase].push({entry,exit,index:i,symbol,id:`C:${i}`});
+            svg += path(`M${entry} ${coilBottom}V${coilTop}H${exit}V${coilBottom}`,colors[phase],`data-coil="${i+1}" data-phase="${phase.toUpperCase()}" data-polarity="${forward?'+':'-'}"`);
+            const direction=forward?1:-1;
+            svg += path(`M${x-direction*9} ${coilTop}h${direction*18}`,colors[phase],`marker-end="url(#arrow-${phase})"`);
+            svg += path(`M${entry} ${(top+bottom)/2+14}V${(top+bottom)/2-14}`,colors[phase],`marker-end="url(#arrow-${phase})"`);
+            svg += path(`M${exit} ${(top+bottom)/2-14}V${(top+bottom)/2+14}`,colors[phase],`marker-end="url(#arrow-${phase})"`);
+            svg += text(x,top-29,symbol,13,'middle',colors[phase]);
+        }
+        svg += '</g>';
+    }
+    svg += linearWindingTerminalsSVG(groups,complete,phaseConnection,width,coilBottom,neutralRow,phaseStride);
+    box.innerHTML=svg+'</svg>';
+}
+
+var outerStatorMode = true;
+function toggleStatorView() {
+    outerStatorMode = !outerStatorMode;
+    document.getElementById('statorToggle').textContent = outerStatorMode ? 'Switch to inner stator' : 'Switch to outer stator';
+    document.getElementById('statorToggle').setAttribute('aria-pressed',String(!outerStatorMode));
+    if (document.getElementById('statorCanvas')) {
+        if (isManualScheme) calculateManualWinding(); else calculateWinding();
+    }
+}
+// Reflect local tooth coordinates while preserving the shaft and coil widths.
+// Original yoke radii 112..148 become outer yoke radii 264..300.
+function outerStatorContext(ctx,halfShaft=null) {
+    const radiusSum = 412;
+    let last = null, first = null;
+    function wireY(y) {
+        return halfShaft!==null && Math.abs(y)>=Math.max(halfShaft*0.8-2,0.5) ? Math.sign(y)*Math.max(Math.abs(y)+4,halfShaft+6) : y;
+    }
+    function point(x, y) {
+        // Keep the winding sides outside the straight tooth edges, including
+        // the legacy paths that used to run two pixels inside an edge.
+        return [radiusSum - x, y];
+    }
+    function radialPoint(x, y) {
+        const r = Math.hypot(x, y);
+        if (!r) return [0, 0];
+        const scale = (radiusSum - r) / r;
+        return [x * scale, y * scale];
+    }
+    function line(x, y) {
+        if (!last) { ctx.moveTo(...point(x,y)); first=[x,y]; }
+        else ctx.lineTo(...point(x,y));
+        last=[x,y];
+    }
+    const methods = {
+        beginPath() { last = first = null; ctx.beginPath(); },
+        moveTo(x,y) { ctx.moveTo(...point(x,y)); last = first = [x,y]; },
+        lineTo: line,
+        leadTo(x,y) {
+            // External terminals are beyond the 300-pixel outer yoke.
+            const endpoint=[330,wireY(y)];
+            ctx.lineTo(...endpoint);
+            last = null;
+            return endpoint;
+        },
+        closePath() { if (first) line(...first); ctx.closePath(); },
+        arc(x,y,r,start,end,ccw) {
+            if (x===0 && y===0) {
+                ctx.arc(0,0,radiusSum-r,start,end,ccw);
+                last=[r*Math.cos(end),r*Math.sin(end)];
+                if (!first) first=[r*Math.cos(start),r*Math.sin(start)];
+            } else {
+                // Distributed winding markers retain their circular cross-section.
+                const center = radialPoint(x,y);
+                ctx.arc(...center,r,start,end,ccw);
+                last = null;
+
+            }
+        },
+        fillText(text,x,y,...args) {
+            let position;
+            if (text === '+' || text === '-') position = radialPoint(x,y);
+            else {
+                position = /^\d+$/.test(String(text)) ? [radiusSum-x-24,y] : [330,y];
+            }
+            ctx.save();
+            ctx.textAlign = 'center';
+            ctx.fillText(text,...position,...args);
+            ctx.restore();
+        }
+    };
+    return new Proxy(ctx, {
+        get(target,key) { if(methods[key]) return methods[key]; const value=Reflect.get(target,key,target); return typeof value==='function' ? value.bind(target) : value; },
+        set(target,key,value) { Reflect.set(target,key,value,target); return true; }
+    });
+}
+
+function statorLeadTo(context,x,y,name) {
+    let endpoint;
+    if (outerStatorMode) endpoint=context.leadTo(x,y);
+    else { context.lineTo(x,y); endpoint=[x,y]; }
+    const position=new DOMPoint(...endpoint).matrixTransform(context.getTransform());
+    context.canvas.windingTerminals[name]={x:position.x,y:position.y};
+}
+
+
+function decorateCircularTerminals(canvas,connection,complete) {
+    const ctx=canvas.getContext('2d'),center=canvas.width/2;
+    const terminals=canvas.windingTerminals;
+    const phases=['a','b','c'];
+    const jumperWidth=canvas.windingWireWidth || 4,jumperColor='#777';
+    const terminalRadius=canvas.circularLayout?.externalTerminalRadius || canvas.circularLayout?.terminalRadius || 330;
+    const lineTapRadius=terminalRadius+115,lineLabelRadius=terminalRadius+134;
+    const point=(r,a)=>({x:center+r*Math.cos(a),y:center+r*Math.sin(a)});
+    const angle=p=>Math.atan2(p.y-center,p.x-center);
+    function extendTerminal(terminal,radius) {
+        const a=terminal.axis ?? angle(terminal);
+        const dx=Math.cos(a),dy=Math.sin(a),x=terminal.x-center,y=terminal.y-center;
+        const projection=x*dx+y*dy;
+        const distance=-projection+Math.sqrt(Math.max(0,projection*projection+radius*radius-x*x-y*y));
+        return {x:terminal.x+distance*dx,y:terminal.y+distance*dy};
+    }
+    function label(text,p,size=15) {
+        ctx.font=`${size}px Arial`;ctx.textAlign='center';ctx.textBaseline='middle';
+        ctx.lineWidth=5;ctx.strokeStyle='white';ctx.strokeText(text,p.x,p.y);
+        ctx.fillStyle='#111';ctx.fillText(text,p.x,p.y);
+    }
+    ctx.save();ctx.setTransform(1,0,0,1,0,0);
+    if (connection!=='Y' && complete && (!distributedWinding||parallelCoilsActive()) && phases.every(p=>terminals['start-'+p] && terminals['end-'+p])) {
+        const pairs=[['a','c'],['b','a'],['c','b']];
+        const routes=pairs.map(([start,end],i)=>({start,end,
+            from:terminals['start-'+start],to:terminals['end-'+end],r:terminalRadius+25+i*29}));
+        const radialLegs=routes.flatMap(route=>[
+            {terminal:route.from,inner:Math.hypot(route.from.x-center,route.from.y-center),outer:lineTapRadius},
+            {terminal:route.to,inner:Math.hypot(route.to.x-center,route.to.y-center),outer:route.r}
+        ]);
+        routes.forEach(route=>{
+            const startOnTrack=extendTerminal(route.from,route.r),endOnTrack=extendTerminal(route.to,route.r);
+            const a1=angle(startOnTrack),a2=angle(endOnTrack);
+            let sweep=(a2-a1+3*Math.PI)%(2*Math.PI)-Math.PI;
+            const direction=Math.sign(sweep)||1;
+            const crossings=radialLegs.filter(leg=>leg.inner<route.r-2 && leg.outer>route.r+2).map(leg=>{
+                let distance=((angle(extendTerminal(leg.terminal,route.r))-a1)*direction+2*Math.PI)%(2*Math.PI);
+                return distance;
+            }).filter(distance=>distance>0.035 && distance<Math.abs(sweep)-0.035).sort((a,b)=>a-b);
+            // Terminal extensions stay collinear with their colored Start/End leads.
+            ctx.beginPath();ctx.moveTo(route.from.x,route.from.y);
+            let p=extendTerminal(route.from,lineTapRadius);ctx.lineTo(p.x,p.y);
+            ctx.moveTo(route.to.x,route.to.y);p=endOnTrack;ctx.lineTo(p.x,p.y);
+            ctx.lineWidth=jumperWidth;ctx.strokeStyle=jumperColor;ctx.stroke();
+            const track=new Path2D();p=point(route.r,a1);track.moveTo(p.x,p.y);
+            let previous=a1;
+            for (const distance of crossings) {
+                const a=a1+direction*distance,delta=5/route.r;
+                const before=a-direction*delta,after=a+direction*delta;
+                track.arc(center,center,route.r,previous,before,direction<0);
+                const control=point(route.r+12,a),end=point(route.r,after);
+                track.quadraticCurveTo(control.x,control.y,end.x,end.y);previous=after;
+            }
+            track.arc(center,center,route.r,previous,a1+sweep,direction<0);
+            ctx.lineWidth=jumperWidth+4;ctx.strokeStyle='white';ctx.stroke(track);
+            ctx.lineWidth=jumperWidth;ctx.strokeStyle=jumperColor;ctx.stroke(track);
+            p=point(route.r,a1);ctx.beginPath();ctx.arc(p.x,p.y,jumperWidth,0,2*Math.PI);ctx.fillStyle=jumperColor;ctx.fill();
+            label('Line '+route.start.toUpperCase(),extendTerminal(route.from,lineLabelRadius),17);
+        });
+        canvas.dataset.deltaJumpers=JSON.stringify(pairs);
+    }
+    // Offset terminal names tangentially so their radial jumpers cannot cross text.
+    for (const [name,terminal] of Object.entries(terminals)) {
+        const a=angle(terminal),r=Math.hypot(terminal.x-center,terminal.y-center);
+        const p=point(r+9,a);
+        const tangent=name.startsWith('start-')?24:-24;
+        p.x-=tangent*Math.sin(a);p.y+=tangent*Math.cos(a);
+        label((name.startsWith('start-')?'Start ':'End ')+name.at(-1).toUpperCase(),p);
+    }
+    ctx.restore();
+}
+
+
+function drawCleanCircularWinding(ctx,canvas,count,windingScheme,step,connection,toothWidth,toothHeight) {
+    const center=canvas.width/2,slotAngle=2*Math.PI/count;
+    const layout=canvas.circularLayout;
+    const symbols=windingScheme.replace(/\//g,'').split('');
+    const active=Math.min(count,step || count+1), complete=active>=count;
+    const rotation=-Math.PI/2-((step || count+1)-1)*slotAngle;
+    const wireWidth=layout.wireWidth;
+    const half=toothWidth/4,side=half+wireWidth/2,leadGap=layout.leadGap;
+    canvas.windingWireWidth=wireWidth;
+    const groups={a:[],b:[],c:[]};
+    const point=(r,a)=>({x:center+r*Math.cos(a),y:center+r*Math.sin(a)});
+    const radius=p=>Math.hypot(p.x-center,p.y-center);
+    const angle=p=>Math.atan2(p.y-center,p.x-center);
+    const colors={a:'#EA0000',b:'#008AE6',c:'#00CA00'};
+    const map=(x,y,a)=>{
+        const r=outerStatorMode?412-x:x+layout.toothShift;
+        return {x:center+r*Math.cos(a)-y*Math.sin(a),y:center+r*Math.sin(a)+y*Math.cos(a)};
+    };
+    function stroke(color) {ctx.strokeStyle=color;ctx.lineWidth=wireWidth;ctx.stroke();}
+    function circle(r,a1,a2,color,clockwise=false) {
+        let sweep=clockwise?(a2-a1+2*Math.PI)%(2*Math.PI):(a2-a1+3*Math.PI)%(2*Math.PI)-Math.PI;
+        ctx.beginPath();let p=point(r,a1);ctx.moveTo(p.x,p.y);
+        ctx.arc(center,center,r,a1,a1+sweep,sweep<0);stroke(color);
+    }
+    function radial(from,r,color) {
+        const to=point(r,angle(from));
+        ctx.beginPath();ctx.moveTo(from.x,from.y);ctx.lineTo(to.x,to.y);stroke(color);
+        return to;
+    }
+    // Keep entry/exit runs parallel to the tooth axis. Only the small
+    // side step moves away from the tooth; the wound turns are unchanged.
+    function escape(from,axis,sign) {
+        return {from,axis,sign};
+    }
+    function leadToTrack(lead,r,color) {
+        const cos=Math.cos(lead.axis),sin=Math.sin(lead.axis);
+        const localX=(lead.from.x-center)*cos+(lead.from.y-center)*sin;
+        const y=lead.sign*leadGap;
+        const trackX=Math.sqrt(Math.max(0,r*r-y*y));
+        const sidePoint={x:center+localX*cos-y*sin,y:center+localX*sin+y*cos};
+        const endpoint={x:center+trackX*cos-y*sin,y:center+trackX*sin+y*cos,axis:lead.axis};
+        ctx.beginPath();ctx.moveTo(lead.from.x,lead.from.y);
+        ctx.lineTo(sidePoint.x,sidePoint.y);ctx.lineTo(endpoint.x,endpoint.y);stroke(color);
+        return endpoint;
+    }
+    ctx.save();ctx.setTransform(1,0,0,1,0,0);
+    ctx.lineCap='round';ctx.lineJoin='round';
+    for(let i=0;i<count;i++) {
+        const symbol=symbols[i] || '-',phase=symbol.toLowerCase(),a=rotation+i*slotAngle;
+        const numberRadius=outerStatorMode?412-toothHeight-31:toothHeight+12+layout.toothShift;
+        const label=point(numberRadius,a);
+        ctx.font='12px Arial';ctx.fillStyle='#222';ctx.textAlign='center';ctx.textBaseline='middle';
+        ctx.fillText(String(i+1),label.x,label.y);
+        if(!colors[phase] || i>=active) continue;
+        const forward=symbol!==phase;
+        ctx.beginPath();
+        for(let turn=0;turn<5;turn++) {
+            const y=turn*15;
+            const start=map((forward?156:171)+y,side,a);
+            const end=map((forward?171:156)+y,-side,a);
+            ctx.moveTo(start.x,start.y);ctx.lineTo(end.x,end.y);
+        }
+        stroke(colors[phase]);
+        const entrySign=forward?-1:1,exitSign=-entrySign;
+        groups[phase].push({
+            entry:escape(map(156,entrySign*side,a),a,entrySign),
+            exit:escape(map(231,exitSign*side,a),a,exitSign),index:i
+        });
+    }
+    const phases=['a','b','c'];
+    phases.forEach((phase,p)=>{
+        const coils=groups[phase],color=colors[phase];
+        for(let i=0;i<coils.length-1;i++) {
+            const route=layout.routes.find(route=>route.phase===phase && route.link===i);
+            const from=leadToTrack(coils[i].exit,route.startRadius,color),to=leadToTrack(coils[i+1].entry,route.endRadius,color);
+            ctx.beginPath();ctx.moveTo(from.x,from.y);
+            for(const segment of route.segments) {
+                if(segment.type==='arc')ctx.arc(center,center,segment.radius,rotation+segment.start,rotation+segment.end,false);
+                else for(const sample of segment.points) {
+                    const p=point(sample.radius,rotation+sample.angle);ctx.lineTo(p.x,p.y);
+                }
+            }
+            ctx.lineTo(to.x,to.y);stroke(color);
+        }
+        if(!coils.length)return;
+        const first=coils[0],last=coils.at(-1);
+        const start=leadToTrack(first.entry,layout.terminalRadius,color);
+        canvas.windingTerminals['start-'+phase]=start;
+        if(complete && connection!=='Y') {
+            const end=leadToTrack(last.exit,layout.terminalRadius,color);
+            canvas.windingTerminals['end-'+phase]=end;
+        } else if(!complete) leadToTrack(last.exit,outerStatorMode?layout.outer:layout.inner,color);
+    });
+    if(complete && connection==='Y') {
+        const ends=[];
+        const neutralRadius=layout.neutralRadius;
+        phases.forEach(phase=>{
+            if(groups[phase].length)ends.push(leadToTrack(groups[phase].at(-1).exit,neutralRadius,colors[phase]));
+        });
+        if(ends.length) {
+            const angles=ends.map(p=>(angle(p)+2*Math.PI)%(2*Math.PI)).sort((a,b)=>a-b);
+            let largestGap=-1,gapIndex=0;
+            angles.forEach((a,i)=>{const gap=(angles[(i+1)%angles.length]+(i===angles.length-1?2*Math.PI:0))-a;if(gap>largestGap){largestGap=gap;gapIndex=i;}});
+            const begin=angles[(gapIndex+1)%angles.length],end=begin+2*Math.PI-largestGap;
+            ctx.beginPath();const start=point(neutralRadius,begin);ctx.moveTo(start.x,start.y);
+            ctx.arc(center,center,neutralRadius,begin,end);stroke('#777');
+            const tap=ends[0],terminal=radial(tap,neutralRadius+12,'#777');
+            ctx.beginPath();ctx.arc(terminal.x,terminal.y,Math.max(2,wireWidth),0,2*Math.PI);ctx.fillStyle='#777';ctx.fill();
+            const n=point(neutralRadius+30,angle(tap));
+            ctx.font='bold 17px Arial';ctx.fillStyle='#222';ctx.fillText('N',n.x,n.y);
+            canvas.dataset.neutralLabel='N';
+        }
+    }
+    ctx.restore();
+    decorateCircularTerminals(canvas,connection,complete);
+}
+
+
+function simplifyPackedArcs(layout,count,outerMode) {
+    const tau=2*Math.PI,slot=tau/count,routes=layout.routes;
+    const polar=p=>({x:p.radius*Math.cos(p.angle),y:p.radius*Math.sin(p.angle)});
+    const bounds=s=>s.type==='arc'?[s.start,s.end]:[s.points[0].angle,s.points.at(-1).angle];
+    const first=s=>s.type==='arc'?{angle:s.start,radius:s.radius}:s.points[0];
+    const last=s=>s.type==='arc'?{angle:s.end,radius:s.radius}:s.points.at(-1);
+    function radiusAt(route,angle) {
+        for(const segment of route.segments) {
+            const [start,end]=bounds(segment);
+            if(angle<start-1e-7 || angle>end+1e-7)continue;
+            if(segment.type==='arc')return segment.radius;
+            const a=polar(segment.points[0]),b=polar(segment.points.at(-1));
+            const dx=b.x-a.x,dy=b.y-a.y;
+            return (a.x*dy-a.y*dx)/(Math.cos(angle)*dy-Math.sin(angle)*dx);
+        }
+        return null;
+    }
+    function extrema(segment,shift=0) {
+        const [start,end]=bounds(segment),angles=[start+shift,end+shift];
+        if(segment.type!=='arc') {
+            const a=polar(segment.points[0]),b=polar(segment.points.at(-1)),dx=b.x-a.x,dy=b.y-a.y;
+            const t=Math.max(0,Math.min(1,-(a.x*dx+a.y*dy)/(dx*dx+dy*dy)));
+            let angle=Math.atan2(a.y+t*dy,a.x+t*dx);
+            while(angle<start-1e-7)angle+=tau;
+            if(angle<=end+1e-7)angles.push(angle+shift);
+        }
+        return angles;
+    }
+    function fits(candidate,index) {
+        const minimum=layout.inner+layout.wireWidth/2+layout.clearance;
+        const maximum=layout.outer-layout.wireWidth/2-layout.clearance;
+        for(const segment of candidate.segments)for(const angle of extrema(segment)) {
+            const r=radiusAt(candidate,angle);
+            if(r<minimum-1e-6 || r>maximum+1e-6)return false;
+        }
+        for(let j=0;j<routes.length;j++) {
+            if(j===index)continue;
+            const other=routes[j];
+            const clearance=layout.clearance*(candidate.phase===other.phase?1:2);
+            const separation=(layout.wireWidth+clearance)*1.25;
+            for(const shift of [-tau,0,tau]) {
+                const lo=Math.max(candidate.start,other.start+shift),hi=Math.min(candidate.end,other.end+shift);
+                if(hi<lo-1e-8)continue;
+                const angles=[lo,hi];
+                for(const segment of candidate.segments)for(const a of extrema(segment))if(a>lo && a<hi)angles.push(a);
+                for(const segment of other.segments)for(const a of extrema(segment,shift))if(a>lo && a<hi)angles.push(a);
+                // Sample the gaps too: two straight joiners may have their closest
+                // approach between either path's radial extrema.
+                angles.sort((a,b)=>a-b);
+                const samples=angles.slice();
+                for(let k=0;k<angles.length-1;k++) {
+                    const n=Math.max(1,Math.ceil((angles[k+1]-angles[k])/0.008));
+                    for(let m=1;m<n;m++)samples.push(angles[k]+(angles[k+1]-angles[k])*m/n);
+                }
+                for(const angle of samples) {
+                    const a=radiusAt(candidate,angle),b=radiusAt(other,angle-shift);
+                    let gap=outerMode?b-a:a-b;if(index>j)gap=-gap;
+                    if(gap<separation-1e-6)return false;
+                }
+            }
+        }
+        return true;
+    }
+    function mergedSegment(start,end) {
+        return Math.abs(start.radius-end.radius)<1e-7
+            ?{type:'arc',start:start.angle,end:end.angle,radius:start.radius}
+            :{type:'transition',points:[start,end]};
+    }
+    // First try a single true circular arc. Nonoverlapping connections can
+    // reuse that radius without reserving a lane elsewhere around the motor.
+    for(let pass=0;pass<2;pass++)for(let i=0;i<routes.length;i++) {
+        const route=routes[i];
+        if(route.segments.length===1 && route.segments[0].type==='arc')continue;
+        const candidates=[...new Set(route.segments.flatMap(s=>[first(s).radius,last(s).radius]))];
+        const mean=candidates.reduce((a,b)=>a+b,0)/candidates.length;
+        candidates.sort((a,b)=>Math.abs(a-mean)-Math.abs(b-mean));
+        for(const radius of candidates) {
+            const start=route.fromIndex*slot+Math.asin(layout.leadGap/radius)*route.fromSign;
+            let end=route.toIndex*slot+Math.asin(layout.leadGap/radius)*route.toSign;
+            if(end<=start)end+=tau;
+            const candidate={...route,start,end,startRadius:radius,endRadius:radius,
+                segments:[{type:'arc',start,end,radius}]};
+            if(fits(candidate,i)){routes[i]=candidate;break;}
+        }
+    }
+    // Remove local notches from routes that need more than one radius.
+    // Replace several tiny pieces by one arc or one straight joiner, and
+    // retain the edit only if phase order and wire clearance still hold.
+    for(let i=0;i<routes.length;i++) {
+        let route=routes[i];
+        for(let a=0;a<route.segments.length-1;a++) {
+            let accepted=false;
+            for(let b=Math.min(route.segments.length-1,a+12);b>a;b--) {
+                const pieces=route.segments.slice(a,b+1);
+                if(!pieces.some(s=>s.type==='transition'))continue;
+                const start=first(pieces[0]),end=last(pieces.at(-1));
+                if(end.angle-start.angle>slot*1.5)continue;
+                const candidate={...route,segments:[...route.segments.slice(0,a),mergedSegment(start,end),...route.segments.slice(b+1)]};
+                if(fits(candidate,i)){route=candidate;routes[i]=route;accepted=true;break;}
+            }
+            if(accepted)a=Math.max(-1,a-2);
+        }
+        // Join adjacent arcs that ended up on the same circle.
+        const compact=[];
+        for(const segment of route.segments) {
+            const previous=compact.at(-1);
+            if(previous?.type==='arc' && segment.type==='arc' && Math.abs(previous.radius-segment.radius)<1e-7)previous.end=segment.end;
+            else compact.push(segment);
+        }
+        route.segments=compact;
+    }
+}
+
+function circularBackironLayout(count,windingScheme,branchRoutes=null) {
+    const tau=2*Math.PI,slot=tau/count;
+    const preferredWireWidth=(count>42?2:count>24?3:4)*0.75;
+    const symbols=windingScheme.replace(/\//g,'').split(''),groups={a:[],b:[],c:[]};
+    symbols.forEach((s,i)=>{if(groups[s.toLowerCase()])groups[s.toLowerCase()].push({index:i,forward:s!==s.toLowerCase()});});
+    let toothMeasure=950/count;
+    if(count===6)toothMeasure+=3;else if(count===3)toothMeasure-=80;
+    const toothWidth=toothMeasure/2,half=toothWidth/2,maxThickness=2*toothWidth;
+    const routes=branchRoutes || [];
+    if(!branchRoutes)for(const phase of ['a','b','c'])for(let i=0;i<groups[phase].length-1;i++) {
+        const from=groups[phase][i],to=groups[phase][i+1];
+        routes.push({phase,link:i,fromIndex:from.index,toIndex:to.index,
+            fromSign:from.forward?1:-1,toSign:to.forward?-1:1});
+    }
+    let wireWidth=preferredWireWidth,clearance=wireWidth*0.3;
+    let pitch=(wireWidth+clearance)*1.35,padding=wireWidth/2+clearance;
+    let thickness=Math.min(maxThickness,Math.max(12,Math.min(24,toothWidth*0.7)));
+    let inner=0,outer=0,toothShift=0,leadGap=0,blend=0,peakLanes=0;
+    function updateGeometry() {
+        if(outerStatorMode){inner=264;outer=inner+thickness;}
+        else{inner=Math.max(70,148-thickness);outer=inner+thickness;toothShift=outer-148;}
+        leadGap=half+Math.min(Math.max(2,2*wireWidth),half*0.5);
+        blend=Math.min(slot*0.65,Math.max(0.02,4*pitch/(outerStatorMode?inner:outer)));
+    }
+    const smooth=t=>t;
+    function weight(route,angle) {
+        let result=0;
+        for(const shift of [-tau,0,tau]) {
+            const a=angle+shift;
+            if(a>=route.start && a<=route.end)return 1;
+            if(a>route.start-blend && a<route.start)result=Math.max(result,smooth((a-route.start+blend)/blend));
+            if(a>route.end && a<route.end+blend)result=Math.max(result,1-smooth((a-route.end)/blend));
+        }
+        return result;
+    }
+    function rankAt(index,angle) {
+        let rank=0;
+        const previousPhases={a:0,b:0,c:0};
+        for(let i=0;i<index;i++) {
+            const occupancy=weight(routes[i],angle);
+            rank+=occupancy;
+            if(routes[i].phase!==routes[index].phase)previousPhases[routes[i].phase]=Math.max(previousPhases[routes[i].phase],occupancy);
+        }
+        // Same-phase tracks keep their spacing. At an occupied phase boundary,
+        // add one more edge gap so the interphase gap is twice as wide.
+        rank+=Object.values(previousPhases).reduce((sum,presence)=>sum+presence,0)*(pitch-wireWidth)/pitch;
+        return rank;
+    }
+    function radiusAt(index,angle) {
+        const offset=padding+rankAt(index,angle)*pitch;
+        return outerStatorMode?inner+offset:outer-offset;
+    }
+    updateGeometry();
+    for(const route of routes) {
+        const reference=outerStatorMode?inner+padding:outer-padding;
+        route.start=route.fromIndex*slot+Math.asin(Math.min(.95,leadGap/reference))*route.fromSign;
+        route.end=route.toIndex*slot+Math.asin(Math.min(.95,leadGap/reference))*route.toSign;
+        if(route.end<=route.start)route.end+=tau;
+    }
+    // Solve the parallel lead/circular-track intersections together with the
+    // angle-dependent packing. The full winding determines animation geometry.
+    for(let pass=0;pass<16;pass++) {
+        updateGeometry();
+        const endpoints=routes.map((route,i)=>{
+            let start=route.start,end=route.end;
+            for(let j=0;j<8;j++) {
+                start=route.fromIndex*slot+Math.asin(Math.min(.95,leadGap/radiusAt(i,start)))*route.fromSign;
+                end=route.toIndex*slot+Math.asin(Math.min(.95,leadGap/radiusAt(i,end)))*route.toSign;
+                if(end<=start)end+=tau;
+            }
+            return {start,end};
+        });
+        routes.forEach((route,i)=>Object.assign(route,endpoints[i]));
+        let maximum=0;
+        routes.forEach((route,i)=>{
+            const samples=Math.max(16,Math.ceil((route.end-route.start)/0.012));
+            for(let j=0;j<=samples;j++)maximum=Math.max(maximum,rankAt(i,route.start+(route.end-route.start)*j/samples)+1);
+        });
+        peakLanes=routes.length?Math.ceil(maximum-1e-7):0;
+        const preferredPitch=(preferredWireWidth+preferredWireWidth*.3)*1.35;
+        const preferredPadding=preferredWireWidth*.8;
+        const needed=Math.max(0,peakLanes-1)*preferredPitch+2*preferredPadding;
+        const structural=Math.min(maxThickness,Math.max(12,Math.min(24,toothWidth*.7)));
+        thickness=Math.min(maxThickness,Math.max(structural,needed));
+        const scale=needed>maxThickness?maxThickness/needed:1;
+        wireWidth=preferredWireWidth*scale;clearance=wireWidth*.3;
+        pitch=(wireWidth+clearance)*1.35;padding=wireWidth/2+clearance;
+    }
+    updateGeometry();
+    const breaks=routes.flatMap(route=>[route.start-blend,route.start,route.end,route.end+blend]);
+    routes.forEach((route,i)=>{
+        route.startRadius=radiusAt(i,route.start);route.endRadius=radiusAt(i,route.end);
+        const angles=[route.start,route.end];
+        for(const base of breaks)for(const shift of [-tau,0,tau]) {
+            const a=base+shift;if(a>route.start+1e-8 && a<route.end-1e-8)angles.push(a);
+        }
+        angles.sort((a,b)=>a-b);
+        const unique=angles.filter((a,j)=>!j||a-angles[j-1]>1e-8);
+        route.segments=[];
+        for(let j=0;j<unique.length-1;j++) {
+            const start=unique[j],end=unique[j+1];
+            const r0=radiusAt(i,start),r1=radiusAt(i,end),rm=radiusAt(i,(start+end)/2);
+            if(Math.max(Math.abs(r0-r1),Math.abs(rm-r0))<1e-7)route.segments.push({type:'arc',start,end,radius:r0});
+            else {
+                // A single straight connector replaces the curved radial ramp.
+                const points=[{angle:start,radius:r0},{angle:end,radius:r1}];
+                route.segments.push({type:'transition',points});
+            }
+        }
+    });
+    const terminalRadius=outerStatorMode?outer+30:330+toothShift;
+    const layout={inner,outer,toothShift,routes,neutralRadius:terminalRadius+35,terminalRadius,
+        wireWidth,clearance,phaseClearance:clearance*2,pitch,padding,toothWidth,maxThickness,peakLanes,blend,leadGap,
+        center:Math.max(500,Math.ceil(terminalRadius+170))};
+    simplifyPackedArcs(layout,count,outerStatorMode);
+    return layout;
+}
+function shiftedInnerToothContext(ctx,shift) {
+    return new Proxy(ctx,{
+        get(target,key){
+            if(key==='moveTo' || key==='lineTo')return (x,y)=>target[key](x+shift,y);
+            const value=Reflect.get(target,key,target);
+            return typeof value==='function'?value.bind(target):value;
+        },
+        set(target,key,value){Reflect.set(target,key,value,target);return true;}
+    });
+}
+
+function drawCircularStator(numberOfSlots,windingScheme,windingStep,phaseConnection){
+	var sectionSeparatorCount = windingScheme.split('/').length-1
+	!windingStep ? windingStep = numberOfSlots+1+sectionSeparatorCount:0;
+
+	if(windingScheme[windingStep-1] == '/'){
+	      windingStep = windingStep -1;
+	}
+
+
+	// Create and size the circular drawing canvas.
+	var windingCanvasContainer = document.getElementById('windingCanvasContainer');
+
+	if(document.getElementById("statorCanvas")){
+		windingCanvasContainer.removeChild(document.getElementById("statorCanvas"));
+	}
+
+	var statorCanvas = document.createElement('canvas');
+	statorCanvas.id="statorCanvas";
+	const backiron=parallelCoilsActive()?parallelCircularLayout(numberOfSlots,currentConnectionPlan):circularBackironLayout(numberOfSlots,windingScheme);
+    statorCanvas.circularLayout=backiron;
+    const circularCenter=backiron.center;
+	statorCanvas.height = circularCenter*2;
+	statorCanvas.width = circularCenter*2;
+	statorCanvas.innerHTML = labels.canvasUnavailable;
+	windingCanvasContainer.appendChild(statorCanvas);
+
+	var stator = statorCanvas.getContext('2d');
+    statorCanvas.windingTerminals={};
+
+	// Set the stator tooth dimensions.
+	var statorToothHeight = 255;
+	var statorToothWidth = 950;
+	statorToothWidth = statorToothWidth/numberOfSlots
+	statorToothHeight = statorToothHeight - (numberOfSlots/3);
+	if(numberOfSlots ==6){
+		statorToothWidth = statorToothWidth+3;
+	}else if(numberOfSlots ==3){
+		statorToothWidth = statorToothWidth-80;
+	}
+
+	// Draw the stator yoke and clear the bore.
+	stator.fillStyle = "rgb(186,186,186)";
+	stator.beginPath();
+	stator.arc(circularCenter,circularCenter,backiron.outer,0,Math.PI*2,true);
+	stator.closePath();
+	stator.fill();
+
+	stator.fillStyle = "#FFF";
+	stator.beginPath();
+	stator.arc(circularCenter,circularCenter,backiron.inner,0,Math.PI*2,true);
+	stator.closePath();
+	stator.fill();
+
+
+	// Set the base radius for the intercoil connections.
+	var connectionTrackOffset = 100;
+
+	if(numberOfSlots > 21 && numberOfSlots <= 36){
+		connectionTrackOffset = connectionTrackOffset + (numberOfSlots/3.8);
+	}
+
+	// Allocate connection tracks for each phase.
+	var connectionTrackRadii = Array();
+	connectionTrackRadii['a1'] = 40+connectionTrackOffset;
+	connectionTrackRadii['a2'] = 35+connectionTrackOffset;
+	connectionTrackRadii['b1'] = 30+connectionTrackOffset;
+	connectionTrackRadii['b2'] = 25+connectionTrackOffset;
+	connectionTrackRadii['c1'] = 20+connectionTrackOffset;
+	connectionTrackRadii['c2'] = 15+connectionTrackOffset;
+
+
+	var statorGeometry = stator;
+    var neutralLabelPosition = null;
+	if (outerStatorMode) stator = outerStatorContext(stator,statorToothWidth/4);
+    else if(backiron.toothShift) stator=shiftedInnerToothContext(stator,backiron.toothShift);
+	stator.translate(circularCenter,circularCenter);
+
+
+	// Rotate the drawing so the first tooth starts at the top.
+	stator.rotate(270*Math.PI/180);
+	// Draw the teeth around the stator circumference.
+	for(var i=0; i<numberOfSlots; i++){
+
+        if (outerStatorMode) {
+            const root = Math.min(282,backiron.outer-2);
+            const halfShaft = statorToothWidth/4;
+            const shoulder = 412-Math.round(statorToothHeight/1.03);
+            const tipBack = 412-Math.round(statorToothHeight/1.025);
+            const boreRadius = 412-statorToothHeight-statorToothWidth/20;
+            const halfTip = Math.min(statorToothWidth/2, boreRadius*Math.sin(0.85*Math.PI/numberOfSlots));
+            const tipAngle = Math.asin(halfTip/boreRadius);
+            const edgeX = Math.sqrt(boreRadius*boreRadius-halfTip*halfTip);
+            // Draw the physical tooth directly, keeping both shaft sides parallel.
+            statorGeometry.beginPath();
+            statorGeometry.moveTo(root,halfShaft);
+            statorGeometry.lineTo(shoulder,halfShaft);
+            statorGeometry.lineTo(tipBack,halfTip);
+            statorGeometry.lineTo(edgeX,halfTip);
+            // Every tip shares the same bore circle, concave toward the air gap.
+            statorGeometry.arc(0,0,boreRadius,tipAngle,-tipAngle,true);
+            statorGeometry.lineTo(tipBack,-halfTip);
+            statorGeometry.lineTo(shoulder,-halfShaft);
+            statorGeometry.lineTo(root,-halfShaft);
+            statorGeometry.closePath();
+        } else {
+		// Draw an inner stator tooth.
+		stator.beginPath();
+		stator.moveTo(Math.max(130,backiron.inner+2)-backiron.toothShift,statorToothWidth/4);
+		stator.lineTo(Math.round(statorToothHeight/1.03),statorToothWidth/4);
+		stator.lineTo(Math.round(statorToothHeight/1.025),statorToothWidth/2);
+		stator.lineTo(statorToothHeight,statorToothWidth/2);
+		stator.lineTo(statorToothHeight+statorToothWidth/20,0);
+		stator.lineTo(statorToothHeight,-statorToothWidth/2);
+		stator.lineTo(Math.round(statorToothHeight/1.025),-statorToothWidth/2);
+		stator.lineTo(Math.round(statorToothHeight/1.03),-statorToothWidth/4);
+		stator.lineTo(Math.max(130,backiron.inner+2)-backiron.toothShift,-statorToothWidth/4);
+        }
+		stator.textBaseline = 'middle';
+
+		stator.fillStyle = "rgb(186,186,186)";
+		stator.fill();
+		// Rotate to the next position.
+		stator.rotate(Math.PI/(numberOfSlots/2));
+	}
+
+	stator.fillStyle = "#111";
+    if(parallelCoilsActive()) {
+        const secondary=document.getElementById('statorCanvas2');if(secondary)secondary.remove();
+        drawParallelCircularWinding(statorGeometry,statorCanvas,numberOfSlots,windingScheme,windingStep,phaseConnection,statorToothWidth,statorToothHeight);
+        return;
+    }
+    if (!distributedWinding) {
+        const secondary=document.getElementById("statorCanvas2");if(secondary)secondary.remove();
+        drawCleanCircularWinding(statorGeometry,statorCanvas,numberOfSlots,windingScheme,windingStep,phaseConnection,statorToothWidth,statorToothHeight);
+        return;
+    }
+
+	var visibleSections = windingScheme.substr(0,windingStep).split('/');
+
+	// Keep the most recent coil at the top when rendering a partial winding.
+	if(windingStep){
+		stator.rotate(-(windingStep-1-(visibleSections.length-1))*Math.PI/(numberOfSlots/2));
+	}
+	var allWindingSections = windingScheme.split('/');
+	var drawnWindingSections = Array();
+	for(i=0;i<visibleSections.length;i++){
+		drawnWindingSections[i] = allWindingSections[i];
+	}
+	var processedCoilCount = -1;
+	for(sectionIndex=0;sectionIndex<drawnWindingSections.length;sectionIndex++){
+		windingScheme = drawnWindingSections[sectionIndex];
+
+		// Remember the first and last coil of each phase.
+		var lastPhaseCoilIndices = Array();
+		lastPhaseCoilIndices['a'] = false;
+		lastPhaseCoilIndices['b']  = false;
+		lastPhaseCoilIndices['c']  = false;
+
+		// Track which intercoil connection lanes are active.
+		activeConnectionTracks = Array();
+		activeConnectionTracks['a1'] = false;
+		activeConnectionTracks['a2'] = false;
+		activeConnectionTracks['b1'] = false;
+		activeConnectionTracks['b2'] = false;
+		activeConnectionTracks['c1'] = false;
+		activeConnectionTracks['c2'] = false;
+
+		// Track the Y/delta terminal connections.
+		var neutralConnectionState = Array();
+		neutralConnectionState[0] = 0;
+		neutralConnectionState[3] ='abc';
+		var neutralJoinState = false;
+		var firstNeutralPhase = false;
+
+
+		for(var i=0; i<windingScheme.length; i++){
+			processedCoilCount = processedCoilCount+1;
+			if((processedCoilCount+1+sectionIndex) <= windingStep){
+				// Draw the coil turns and their connections.
+				var wireColor = phaseColor (windingScheme[i]);
+
+				var turnDirection = 15;
+				if(windingScheme[i].toLowerCase() == windingScheme[i]){
+					turnDirection = -15;
+				}
+				var abc = 'abc';
+
+				// Draw the coil turns.
+				var coilLeadLabeled = false;
+				for(var y=0; y<75; y=y+15){
+					neutralJoinState = false;
+					if(windingScheme[i].toLowerCase() != '-'){
+						stator.beginPath();
+						// Draw only coils included in the requested frame.
+
+						if(turnDirection == 15){
+							// Draw a forward coil turn.
+							stator.moveTo(156+y,(statorToothWidth/4)+2);
+							stator.lineTo(156+y+turnDirection, -(statorToothWidth/4)-2);
+
+							if(y == 0){
+								// Draw the entry of a forward coil.
+								stator.moveTo(156+y, -(statorToothWidth/4)+2);
+								stator.lineTo(156+y, -(statorToothWidth/4)-2);
+
+								if(!lastPhaseCoilIndices[windingScheme[i].toLowerCase()]){
+									// Draw the start lead for the first forward coil of this phase.
+									lastPhaseCoilIndices[windingScheme[i].toLowerCase()] = windingScheme.toLowerCase().lastIndexOf(windingScheme[i].toLowerCase());
+									stator.moveTo(156+y, -(statorToothWidth/4)+2);
+									stator.lineTo(156+y, -(statorToothWidth/3.5)-5);
+									stator.moveTo(154+y, -(statorToothWidth/3.5)-5);
+									statorLeadTo(stator,300, -(statorToothWidth/3.5)-5,'start-'+windingScheme[i].toLowerCase());
+									stator.font =  "16px 'verdana'";
+									coilLeadLabeled = true;
+
+									activeConnectionTracks[windingScheme[i].toLowerCase()+'1'] = false;
+									activeConnectionTracks[windingScheme[i].toLowerCase()+'2'] = false;
+								}else{
+									// Connect the forward coil entry to its incoming track.
+									if(activeConnectionTracks[windingScheme[i].toLowerCase()+'1']){
+										var connectionTrackIndex = '1';
+									}else if(activeConnectionTracks[windingScheme[i].toLowerCase()+'2']){
+										var connectionTrackIndex = '2';
+									}else{
+										var connectionTrackIndex = '1';
+									}
+									activeConnectionTracks[windingScheme[i].toLowerCase()+connectionTrackIndex] = true;
+									stator.moveTo(156+y, -(statorToothWidth/4.3)-2);
+									stator.lineTo(connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex]-(18/numberOfSlots), -(statorToothWidth/4.3)-2);
+
+									// Continue the connection around the upper-left coil corner.
+									stator.arc(0,0,connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex], (-Math.PI/numberOfSlots)+0.001, -Math.PI/numberOfSlots, true);
+
+
+								}
+							}
+							if(y == 60){
+								// Draw the exit of a forward coil.
+								stator.moveTo(171+y, (statorToothWidth/4)+2);
+								stator.lineTo(171+y, (statorToothWidth/4)-2);
+
+								if(i == lastPhaseCoilIndices[windingScheme[i].toLowerCase()]){
+									// Draw the terminal of the last forward coil in this phase.
+									if(!phaseConnection){
+										stator.moveTo(171+y, (statorToothWidth/4)-2);
+										statorLeadTo(stator,300, (statorToothWidth/4)-2,'end-'+windingScheme[i].toLowerCase());
+										stator.font =  "16px 'verdana'";
+									}else if(phaseConnection == 'Y'){
+										neutralJoinState = true;
+										stator.moveTo(171+y, (statorToothWidth/4.5)-2);
+										stator.lineTo(171+y, (statorToothWidth/4)+5);
+
+										stator.moveTo(171+y, (statorToothWidth/4)+5);
+										stator.lineTo(148, (statorToothWidth/4)+5);
+										neutralConnectionState[1] = windingScheme[i].toLowerCase();
+										switch(neutralConnectionState[0]){
+											case(0):
+												neutralConnectionState[0] = 1;
+												stator.arc(0,0,100,Math.PI/numberOfSlots, (Math.PI/numberOfSlots)+0.001, false);
+												firstNeutralPhase = windingScheme[i].toLowerCase();
+											break;
+											case(1):
+												stator.lineTo(100, 0);
+												neutralConnectionState[0] = 2;
+												neutralJoinState = 'middle';
+												stator.moveTo(100, 0);
+												stator.lineTo(90, 0);
+                                    const neutralTransform = statorGeometry.getTransform();
+                                    neutralLabelPosition = new DOMPoint(outerStatorMode ? 322 : 90,0).matrixTransform(neutralTransform);
+											break;
+											case(2):
+												neutralConnectionState[0] = 3;
+												stator.arc(0,0,100,(-Math.PI/numberOfSlots)+0.001, -Math.PI/numberOfSlots, true);
+											break;
+										}
+									}
+
+									activeConnectionTracks[windingScheme[i].toLowerCase()+'1'] = false;
+									activeConnectionTracks[windingScheme[i].toLowerCase()+'2'] = false;
+								}else{
+
+									// Connect the coil exit to its outgoing track.
+									if(!activeConnectionTracks[windingScheme[i].toLowerCase()+'1']){
+										var connectionTrackIndex = '1';
+										activeConnectionTracks[windingScheme[i].toLowerCase()+'2'] = false;
+									}else if(!activeConnectionTracks[windingScheme[i].toLowerCase()+'2']){
+										var connectionTrackIndex = '2';
+										activeConnectionTracks[windingScheme[i].toLowerCase()+'1'] = false;
+									}
+									activeConnectionTracks[windingScheme[i].toLowerCase()+connectionTrackIndex] = true;
+									// Extend the exit on the right side of the coil.
+									stator.moveTo(171+y, (statorToothWidth/4.5)-2);
+									stator.lineTo(171+y, (statorToothWidth/4)+5);
+
+									stator.moveTo(171+y, (statorToothWidth/4)+5);
+									stator.lineTo(connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex]-(18/numberOfSlots), (statorToothWidth/4)+5);
+
+									// Continue the connection around the upper-right coil corner.
+									stator.arc(0,0,connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex], Math.PI/numberOfSlots, (Math.PI/numberOfSlots)+0.001, false);
+								}
+							}
+
+						}else{
+							// Draw a reverse coil turn.
+							stator.moveTo(171+y,(statorToothWidth/4)+2);
+							stator.lineTo(171+y+turnDirection, -(statorToothWidth/4)-2);
+
+							if(y == 0){
+								// Draw the entry of a reverse coil.
+								stator.moveTo(156+y, (statorToothWidth/4)+2);
+								stator.lineTo(156+y, (statorToothWidth/4)-2);
+								if(!lastPhaseCoilIndices[windingScheme[i].toLowerCase()]){
+									// Draw the start lead for the first reverse coil of this phase.
+									lastPhaseCoilIndices[windingScheme[i].toLowerCase()] = windingScheme.toLowerCase().lastIndexOf(windingScheme[i].toLowerCase());
+									stator.moveTo(156+y, (statorToothWidth/4)+2);
+									stator.lineTo(156+y, (statorToothWidth/3.5)+5);
+									stator.moveTo(154+y, (statorToothWidth/3.5)+5);
+									statorLeadTo(stator,300, (statorToothWidth/3.5)+5,'start-'+windingScheme[i].toLowerCase());
+									stator.font =  "16px 'verdana'";
+									coilLeadLabeled = true;
+
+									activeConnectionTracks[windingScheme[i].toLowerCase()+'1'] = false;
+									activeConnectionTracks[windingScheme[i].toLowerCase()+'2'] = false;
+								}else{
+									// Connect the reverse coil entry to its incoming track.
+									if(activeConnectionTracks[windingScheme[i].toLowerCase()+'1']){
+										var connectionTrackIndex = '1';
+									}else if(activeConnectionTracks[windingScheme[i].toLowerCase()+'2']){
+										var connectionTrackIndex = '2';
+									}else{
+										var connectionTrackIndex = '1';
+									}
+									activeConnectionTracks[windingScheme[i].toLowerCase()+connectionTrackIndex] = true;
+									stator.moveTo(156+y, (statorToothWidth/4.5)+3);
+									stator.lineTo(connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex]-(18/numberOfSlots), (statorToothWidth/4.5)+2);
+
+									stator.lineTo(connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex],0);
+									stator.arc(0,0,connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex],0, -Math.PI/numberOfSlots, true);
+
+								}
+							}
+							if(y == 60){
+								// Draw the exit of a reverse coil.
+								stator.moveTo(171+y, -(statorToothWidth/4)+2);
+								stator.lineTo(171+y, -(statorToothWidth/4)-2);
+
+								if(i == lastPhaseCoilIndices[windingScheme[i].toLowerCase()]){
+									// Draw the terminal of the last reverse coil in this phase.
+									if(!phaseConnection){
+										stator.moveTo(171+y, -(statorToothWidth/4));
+										statorLeadTo(stator,300, -(statorToothWidth/4),'end-'+windingScheme[i].toLowerCase());
+										stator.font =  "16px 'verdana'";
+									}else if(phaseConnection == 'Y'){
+										neutralJoinState = true;
+										stator.moveTo(171+y, -(statorToothWidth/4.5)+2);
+										stator.lineTo(171+y, -(statorToothWidth/4)-5);
+
+										stator.moveTo(171+y, -(statorToothWidth/4)-5);
+										stator.lineTo(148, -(statorToothWidth/4)-5);
+										neutralConnectionState[1] = windingScheme[i].toLowerCase();
+										switch(neutralConnectionState[0]){
+											case(0):
+												neutralConnectionState[0] = 1;
+												stator.arc(0,0,100,Math.PI/numberOfSlots, (Math.PI/numberOfSlots)+0.001, false);
+												firstNeutralPhase = windingScheme[i].toLowerCase();
+											break;
+											case(1):
+												stator.lineTo(100, 0);
+												neutralConnectionState[0] = 2;
+												neutralJoinState = 'middle';
+												stator.moveTo(100, 0);
+												stator.lineTo(90, 0);
+                                    const neutralTransform = statorGeometry.getTransform();
+                                    neutralLabelPosition = new DOMPoint(outerStatorMode ? 322 : 90,0).matrixTransform(neutralTransform);
+											break;
+											case(2):
+												neutralConnectionState[0] = 3;
+												stator.arc(0,0,100,(-Math.PI/numberOfSlots)+0.001, -Math.PI/numberOfSlots, true);
+											break;
+										}
+									}
+
+									activeConnectionTracks[windingScheme[i].toLowerCase()+'1'] = false;
+									activeConnectionTracks[windingScheme[i].toLowerCase()+'2'] = false;
+								}else{
+									// Connect the coil exit to its outgoing track.
+									if(!activeConnectionTracks[windingScheme[i].toLowerCase()+'1']){
+										var connectionTrackIndex = '1';
+										activeConnectionTracks[windingScheme[i].toLowerCase()+'2'] = false;
+									}else if(!activeConnectionTracks[windingScheme[i].toLowerCase()+'2']){
+										var connectionTrackIndex = '2';
+										activeConnectionTracks[windingScheme[i].toLowerCase()+'1'] = false;
+									}
+
+									activeConnectionTracks[windingScheme[i].toLowerCase()+connectionTrackIndex] = true;
+									stator.moveTo(171+y, -(statorToothWidth/4.5)+2);
+									stator.lineTo(171+y, -(statorToothWidth/4)-5);
+
+									stator.moveTo(171+y, -(statorToothWidth/4)-5);
+									stator.lineTo(connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex]-(18/numberOfSlots), -(statorToothWidth/4)-5);
+
+									stator.moveTo(connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex]-(18/numberOfSlots), -(statorToothWidth/4)-5);
+
+									stator.lineTo(connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex], 0);
+									stator.arc(0,0,connectionTrackRadii[windingScheme[i].toLowerCase()+connectionTrackIndex],0, (Math.PI/numberOfSlots)+0.001, false);
+
+								}
+							}
+						}
+
+
+						stator.strokeStyle = wireColor;
+
+
+						stator.lineWidth=4;
+						if(numberOfSlots > 42){
+							stator.lineWidth=2;
+						}
+						if(numberOfSlots > 24 && numberOfSlots <= 42){
+							stator.lineWidth=3;
+						}
+
+						stator.stroke();
+					}
+				}
+
+				// Draw the star neutral connection.
+				if(!neutralJoinState || neutralJoinState == 'middle'){
+					if(neutralJoinState != 'middle'){
+						stator.beginPath();
+						switch(neutralConnectionState[0]){
+							case(1):
+								stator.arc(0,0,100,-Math.PI/numberOfSlots, Math.PI/numberOfSlots, false);
+								stator.strokeStyle = phaseColor(neutralConnectionState[1]);
+							break;
+							case(2):
+								stator.arc(0,0,100,Math.PI/numberOfSlots, -Math.PI/numberOfSlots, true);
+								stator.strokeStyle = phaseColor(neutralConnectionState[3]);
+							break;
+						}
+						stator.stroke();
+						neutralConnectionState[3] = neutralConnectionState[3].replace(neutralConnectionState[1],'');
+					}else{
+						stator.beginPath();
+						stator.arc(0,0,100,-Math.PI/numberOfSlots, 0, false);
+						stator.moveTo(100, -4);
+						stator.lineTo(90, -4);
+						stator.strokeStyle = phaseColor(firstNeutralPhase);
+						stator.stroke();
+
+						stator.beginPath();
+						stator.arc(0,0,100,Math.PI/numberOfSlots, 0, true);
+						stator.moveTo(100, 4);
+						stator.lineTo(90, 4);
+						var remainingNeutralPhase = abc.replace(firstNeutralPhase,'').replace(neutralConnectionState[1],'');
+						stator.strokeStyle = phaseColor(remainingNeutralPhase);
+						stator.stroke();
+						neutralConnectionState[3] = neutralConnectionState[3].replace(neutralConnectionState[1],'');
+					}
+
+				}else{
+
+				}
+
+				// Continue active tracks to the next coil.
+				for(z=1;z<3;z++){
+					for(x=0; x< abc.length; x++){
+						if(activeConnectionTracks[abc[x]+z] && abc[x] != windingScheme[i].toLowerCase()){
+
+							stator.beginPath();
+
+							stator.arc(0,0,connectionTrackRadii[abc[x]+z], Math.PI/numberOfSlots, -Math.PI/numberOfSlots, true);
+							stator.strokeStyle = phaseColor(abc[x]);
+							stator.stroke();
+						}
+					}
+				}
+
+				// Label each stator tooth.
+				stator.font =  "12px 'verdana'";
+				if(numberOfSlots <= 6){
+					stator.fillText ? stator.fillText(i+1, statorToothHeight+14, 0):0;
+				}else{
+					stator.fillText ? stator.fillText(i+1, statorToothHeight+7, 0):0;
+				}
+
+			// Rotate to the next position.
+			stator.rotate(Math.PI/(numberOfSlots/2));
+			}
+		}
+	}
+    if (phaseConnection === 'Y' && neutralLabelPosition) {
+        statorGeometry.save();
+        statorGeometry.setTransform(1,0,0,1,0,0);
+        const dx=neutralLabelPosition.x-circularCenter,dy=neutralLabelPosition.y-circularCenter;
+        const radius=Math.hypot(dx,dy);
+        const offset=outerStatorMode ? 20 : -20;
+        statorGeometry.fillStyle='#222';
+        statorGeometry.beginPath();
+        statorGeometry.arc(neutralLabelPosition.x,neutralLabelPosition.y,4,0,Math.PI*2);
+        statorGeometry.fill();
+        statorGeometry.font='bold 17px Arial';
+        statorGeometry.textAlign='center';
+        statorGeometry.textBaseline='middle';
+        statorGeometry.fillText('N',neutralLabelPosition.x+offset*dx/radius,neutralLabelPosition.y+offset*dy/radius);
+        statorCanvas.dataset.neutralLabel='N';
+        statorGeometry.restore();
+    }
+
+    decorateCircularTerminals(statorCanvas,phaseConnection,windingStep>=numberOfSlots);
+
+	if(distributedWinding){
+		drawDistributedSlotConductors(distributedWinding,numberOfSlots);
+	}else{
+		if(document.getElementById("statorCanvas2")){
+			mainContainer.removeChild(document.getElementById("statorCanvas2"));
+		}
+	}
+}
+
+function drawDistributedSlotConductors(distributedPattern,numberOfSlots){
+	var statorCanvas = document.getElementById("statorCanvas");
+	var conductorContext = statorCanvas.getContext('2d');
+	if (outerStatorMode) conductorContext = outerStatorContext(conductorContext);
+	var conductorLayers = distributedPattern.split('|');
+	var conductorSlotCount = conductorLayers.length-1;
+
+	conductorContext.rotate((270*Math.PI/180)-Math.PI/(conductorSlotCount/2));
+
+	for(y = 0;y<2;y++){
+		if(conductorLayers[0][y]){
+			conductorContext.rotate((Math.PI/(conductorSlotCount/2))/2);
+			for(i = 0;i<numberOfSlots;i++){
+				conductorContext.beginPath();
+				conductorContext.lineWidth=4;
+				if(y==0){
+					if(conductorLayers[0][1]){
+						var conductorRadius = 170;
+					}else{
+						var conductorRadius = 200;
+					}
+				}else{
+					var conductorRadius = 222;
+				}
+
+				conductorContext.arc(0,conductorRadius,10, 0.001,0, false);
+				conductorContext.strokeStyle = phaseColor(conductorLayers[i][y].toLowerCase());
+
+				conductorContext.font =  "20px 'verdana'";
+				if(conductorLayers[i][y] == conductorLayers[i][y].toLowerCase()){
+					conductorContext.fillText ? conductorContext.fillText('-', -4, conductorRadius-2):0;
+				}else{
+					conductorContext.fillText ? conductorContext.fillText('+', -8, conductorRadius-2):0;
+				}
+
+				conductorContext.stroke();
+				conductorContext.rotate(Math.PI/(conductorSlotCount/2));
+			}
+		conductorContext.rotate(-(Math.PI/(conductorSlotCount/2))/2);
+		}
+	}
+    const extra=document.getElementById('statorCanvas2');
+    if(extra)extra.remove();
+}
+
+
+function drawRotorPoles(){
+	var statorCanvas = document.getElementById("statorCanvas");
+	var rotorContext = statorCanvas.getContext('2d');
+	northPoleColor = "rgba(255,0,0,0.3)";
+	southPoleColor = "rgba(0,0,255,0.3)";
+
+	for(var i=0; i<calculatedPoles; i++){
+		// Draw the rotor back iron.
+		rotorContext.beginPath();
+		rotorContext.lineWidth=10;
+		rotorContext.arc(0,0,301, Math.PI/(calculatedPoles/2), -Math.PI/(calculatedPoles/2), true);
+		rotorContext.strokeStyle = "rgba(68,68,68,0.3)";
+		rotorContext.stroke();
+
+		// Draw the rotor pole magnets.
+		rotorContext.beginPath();
+		rotorContext.lineWidth=18;
+		rotorContext.arc(0,0,287, (Math.PI/(calculatedPoles/2)/200)*67, (-Math.PI/(calculatedPoles/2)/200)*67, true);
+		if(i%2!=0){
+			rotorContext.strokeStyle = southPoleColor;
+		}else{
+			rotorContext.strokeStyle = northPoleColor;
+		}
+		rotorContext.stroke();
+		// Rotate to the next position.
+		rotorContext.rotate(Math.PI/(calculatedPoles/2));
+	}
+}
+
+
+function sampleWindingFactor(sampledScheme,sampledCoilTurns,harmonicPoleCount,cyclePosition,sampleNormalization){
+	var transformSlotCount=sampledScheme.length;
+	var phaseCurrents = Array();
+	phaseCurrents['a'] = Array();
+	phaseCurrents['b'] = Array();
+	phaseCurrents['c'] = Array();
+	phaseCurrents['-'] = Array();
+	// Phase A reference current.
+	phaseCurrents['a'][cyclePosition] = 1*Math.sin(cyclePosition*2*Math.PI);
+	// Phase B reference current.
+	phaseCurrents['b'][cyclePosition] = 1*Math.sin(cyclePosition*2*Math.PI+(2*Math.PI)/3);
+	// Phase C reference current.
+	phaseCurrents['c'][cyclePosition] = 1*Math.sin(cyclePosition*2*Math.PI-(2*Math.PI)/3);
+	// Zero current for an unwound slot.
+	phaseCurrents['-'][cyclePosition] = 0;
+	slotCurrentDistribution = Array();
+	for(i=0;i<sampledScheme.length;i++){
+		var currentCoilCurrent = 0;
+		var previousCoilCurrent = 0;
+
+		var currentCoilTurns = 0;
+		var previousCoilTurns = 0;
+
+		currentCoilCurrent = 1*(phaseCurrents[sampledScheme[i].toLowerCase()][cyclePosition]);
+		currentCoilTurns = sampledCoilTurns[i];
+		if(sampledScheme[i].toLowerCase() == sampledScheme[i]){
+			currentCoilCurrent = -1*(phaseCurrents[sampledScheme[i].toLowerCase()][cyclePosition]);
+		}
+		currentCoilCurrent = currentCoilCurrent*currentCoilTurns;
+
+		if(i==0){
+			previousCoilCurrent = 1*(phaseCurrents[sampledScheme[sampledScheme.length-1].toLowerCase()][cyclePosition]);
+			previousCoilTurns = sampledCoilTurns[sampledScheme.length-1];
+			if(sampledScheme[sampledScheme.length-1].toLowerCase() != sampledScheme[sampledScheme.length-1]){
+				previousCoilCurrent = -1*(phaseCurrents[sampledScheme[sampledScheme.length-1].toLowerCase()][cyclePosition]);
+			}
+			previousCoilCurrent = previousCoilCurrent*previousCoilTurns;
+		}else{
+			previousCoilCurrent = 1*(phaseCurrents[sampledScheme[i-1].toLowerCase()][cyclePosition]);
+			previousCoilTurns = sampledCoilTurns[i-1];
+			if(sampledScheme[i-1].toLowerCase() != sampledScheme[i-1]){
+				previousCoilCurrent = -1*(phaseCurrents[sampledScheme[i-1].toLowerCase()][cyclePosition]);
+			}
+			previousCoilCurrent = previousCoilCurrent*previousCoilTurns;
+		}
+		slotCurrentDistribution[i] = (currentCoilCurrent+previousCoilCurrent)/sampleNormalization;
+	}
+	fourierSum = 0;
+	for (x=0;x<transformSlotCount;x++){
+		fourierSum = fourierSum + slotCurrentDistribution[x] / transformSlotCount * Math.sin(harmonicPoleCount * Math.PI * x / transformSlotCount);
+	}
+	fourierSineComponent = fourierSum * 2;
+	fourierSum = 0;
+
+	for (x=0;x<transformSlotCount;x++){
+		fourierSum = fourierSum + slotCurrentDistribution[x] / transformSlotCount * Math.cos(harmonicPoleCount * Math.PI * x / transformSlotCount);
+	}
+	fourierCosineComponent = fourierSum * 2;
+
+	sampledFactorMagnitude = Math.round(Math.pow(Math.pow(fourierCosineComponent,2) + Math.pow(fourierSineComponent,2),0.5)* 100000) / 100000;  // Magnitude of the winding factor.
+	return sampledFactorMagnitude;
+}
+
+
+function calculateWindingFactors(windingScheme,singleLayer){
+	var transformSlotCount=windingScheme.length;
+	var maximumHarmonicOrder = transformSlotCount*6;      // Compute the spectrum through six times the slot count.
+	var phaseCurrents = Array();
+
+	for(sampleTimeIndex=0;sampleTimeIndex<referenceCycleTimes.length;sampleTimeIndex++){
+		phaseCurrents['a'] = Array();
+		phaseCurrents['b'] = Array();
+		phaseCurrents['c'] = Array();
+		phaseCurrents['-'] = Array();
+
+
+		// Phase A reference current.
+		phaseCurrents['a'][referenceCycleTimes[sampleTimeIndex]] = 1*Math.sin(referenceCycleTimes[sampleTimeIndex]*2*Math.PI);
+		// Phase B reference current.
+		phaseCurrents['b'][referenceCycleTimes[sampleTimeIndex]] = 1*Math.sin(referenceCycleTimes[sampleTimeIndex]*2*Math.PI+(2*Math.PI)/3);
+		// Phase C reference current.
+		phaseCurrents['c'][referenceCycleTimes[sampleTimeIndex]] = 1*Math.sin(referenceCycleTimes[sampleTimeIndex]*2*Math.PI-(2*Math.PI)/3);
+		// Zero current for an unwound slot.
+		phaseCurrents['-'][referenceCycleTimes[sampleTimeIndex]] = 0;
+
+		slotCurrentDistribution = Array();
+		if(!distributedWinding){
+			for(i=0;i<windingScheme.length;i++){
+				var currentCoilCurrent = 0;
+				var previousCoilCurrent = 0;
+
+				currentCoilCurrent = 1*(phaseCurrents[windingScheme[i].toLowerCase()][referenceCycleTimes[sampleTimeIndex]]);
+				if(windingScheme[i].toLowerCase() == windingScheme[i]){
+					currentCoilCurrent = -1*(phaseCurrents[windingScheme[i].toLowerCase()][referenceCycleTimes[sampleTimeIndex]]);
+				}
+
+				if(i==0){
+					previousCoilCurrent = 1*(phaseCurrents[windingScheme[windingScheme.length-1].toLowerCase()][referenceCycleTimes[sampleTimeIndex]]);
+					if(windingScheme[windingScheme.length-1].toLowerCase() != windingScheme[windingScheme.length-1]){
+						previousCoilCurrent = -1*(phaseCurrents[windingScheme[windingScheme.length-1].toLowerCase()][referenceCycleTimes[sampleTimeIndex]]);
+					}
+				}else{
+					previousCoilCurrent = 1*(phaseCurrents[windingScheme[i-1].toLowerCase()][referenceCycleTimes[sampleTimeIndex]]);
+					if(windingScheme[i-1].toLowerCase() != windingScheme[i-1]){
+						previousCoilCurrent = -1*(phaseCurrents[windingScheme[i-1].toLowerCase()][referenceCycleTimes[sampleTimeIndex]]);
+					}
+				}
+
+				slotCurrentDistribution[i] = currentCoilCurrent+previousCoilCurrent;
+				if(currentCoilCurrent!=0 && previousCoilCurrent!=0){
+					slotCurrentDistribution[i] = (currentCoilCurrent+previousCoilCurrent)/2;
+				}
+			}
+		}else{
+			var factorSlotLayers = distributedWinding.split('|');
+			for(i=0;i<(factorSlotLayers.length-1);i++){
+				var currentCoilCurrent = 1*(phaseCurrents[factorSlotLayers[i][0].toLowerCase()][referenceCycleTimes[sampleTimeIndex]]);
+				if(factorSlotLayers[i][0].toLowerCase() == factorSlotLayers[i][0]){
+					currentCoilCurrent = -1*(phaseCurrents[factorSlotLayers[i][0].toLowerCase()][referenceCycleTimes[sampleTimeIndex]]);
+				}
+				var previousCoilCurrent = 0;
+				if(factorSlotLayers[i][1]){
+					previousCoilCurrent = 1*(phaseCurrents[factorSlotLayers[i][1].toLowerCase()][referenceCycleTimes[sampleTimeIndex]]);
+					if(factorSlotLayers[i][1].toLowerCase() == factorSlotLayers[i][1]){
+						previousCoilCurrent = -1*(phaseCurrents[factorSlotLayers[i][1].toLowerCase()][referenceCycleTimes[sampleTimeIndex]]);
+					}
+					slotCurrentDistribution[i] = (currentCoilCurrent+previousCoilCurrent)/2;
+				}else{
+					slotCurrentDistribution[i] = currentCoilCurrent;
+				}
+			}
+		}
+
+		windingFactors[sampleTimeIndex] = Array();
+
+		for(n=0;n<=maximumHarmonicOrder;n++){
+			fourierSum = 0;
+			for (x=0;x<transformSlotCount;x++){
+				fourierSum = fourierSum + slotCurrentDistribution[x] / transformSlotCount * Math.sin(n * 2 * Math.PI * x / transformSlotCount);
+			}
+			fourierSineComponent = fourierSum * 2;
+			fourierSum = 0;
+
+			for (x=0;x<transformSlotCount;x++){
+				fourierSum = fourierSum + slotCurrentDistribution[x] / transformSlotCount * Math.cos(n * 2 * Math.PI * x / transformSlotCount);
+			}
+			fourierCosineComponent = fourierSum * 2;
+
+			windingFactors[sampleTimeIndex][n-1] = Math.round(Math.pow(Math.pow(fourierCosineComponent,2) + Math.pow(fourierSineComponent,2),0.5)* 100000) / 100000;  // Magnitude of the winding factor.
+		}
+	}
+}
+
+function highlightInvalidInput(id){
+	var invalidField = document.getElementById(id);
+	invalidField.style.backgroundColor="#E7796D";
+	setTimeout(()=>document.getElementById(id).style.backgroundColor="#FFF",300);
+
+}
+
+function clearWindingResults(){
+		if(document.getElementById('primaryProperties')){
+			document.getElementById('primaryProperties').innerHTML ='';
+		}
+		if(document.getElementById('steps')){
+			document.getElementById('windingCanvasContainer').removeChild(document.getElementById("statorCanvas"));
+			document.getElementById('steps').innerHTML = '';
+		}
+		if(document.getElementById("statorCanvas2")){
+			mainContainer.removeChild(document.getElementById("statorCanvas2"));
+		}
+		if(document.getElementById('showFactorDetails')){
+			document.getElementById('showFactorDetails').innerHTML="";
+		}
+		if(document.getElementById('factorCorrectionInputs')){
+			document.getElementById('factorDetails').innerHTML='';
+		}
+
+}
+
+
+// Original winding calculation algorithm from POWERCROCO.DE.
+//	(C) 2004 overclocker_2001 alias oc2k1 & DrM (drmalte@maltemedia.de)
+// Adapted for this calculator.
+
+
+function calculateWinding() {
+	var form = document.windingCalculator;
+	var slotCount = Number(form.slotCount.value);
+	var poleCount = Number(form.poleCount.value);
+
+	if( slotCount % 3 != 0 || slotCount < 3 ) {
+		document.getElementById('windingSchemeResult').innerHTML = labels.invalidSlotCount;
+		document.windingCalculator.slotCount.focus();
+		document.windingCalculator.slotCount.select();
+		highlightInvalidInput(document.windingCalculator.slotCount.id);
+		clearWindingResults();
+		return;
+	}
+
+	if( poleCount % 2 != 0 || poleCount < 2 ) {
+		document.getElementById('windingSchemeResult').innerHTML  = labels.invalidPoleCount;
+		document.windingCalculator.poleCount.focus();
+		document.windingCalculator.poleCount.select();
+		highlightInvalidInput(document.windingCalculator.poleCount.id);
+		clearWindingResults();
+		return;
+	}
+
+	if( poleCount == slotCount ) {
+		document.getElementById('windingSchemeResult').innerHTML  = labels.matchingSlotPoleCounts;
+		document.windingCalculator.poleCount.focus();
+		document.windingCalculator.poleCount.select();
+		highlightInvalidInput(document.windingCalculator.poleCount.id);
+		clearWindingResults();
+		return;
+	}
+
+	var slotsPerPolePerPhase = slotCount/3/poleCount;
+
+	if(slotsPerPolePerPhase >= 1 ){
+		distributedWinding=true;
+	}else{
+		distributedWinding = false;
+	}
+
+	electricalSlotAngle = 180 * poleCount / slotCount;
+	a = 0; b = 0; c = 0;
+	A = 0; B = 0; C = 0;
+	m = 0;
+	windingScheme = ""
+	accumulatedElectricalAngle = 0;
+	if(!distributedWinding){
+		for( i = 0; i < slotCount; i++ ) {
+			if(i%2!=0 && isSingleLayer){
+				windingScheme += "-";m++;
+			}else{
+				if( accumulatedElectricalAngle >= 330 || accumulatedElectricalAngle <  30 ){windingScheme += "A";A++;}
+				if( accumulatedElectricalAngle >=  30 && accumulatedElectricalAngle <  90 ){windingScheme += "b";b++;}
+				if( accumulatedElectricalAngle >=  90 && accumulatedElectricalAngle < 150 ){windingScheme += "C";C++;}
+				if( accumulatedElectricalAngle >= 150 && accumulatedElectricalAngle < 210 ){windingScheme += "a"; a++;}
+				if( accumulatedElectricalAngle >= 210 && accumulatedElectricalAngle < 270 ){windingScheme += "B";B++;}
+				if( accumulatedElectricalAngle >= 270 && accumulatedElectricalAngle < 330 ){windingScheme += "c"; c++;}
+			}
+			accumulatedElectricalAngle = ( accumulatedElectricalAngle + electricalSlotAngle ) % 360;
+		}
+	}else{
+
+		for( i = 0; i < slotCount;i++) {
+			if( accumulatedElectricalAngle >= 330 || accumulatedElectricalAngle <  30 ){windingScheme += "A";A++;}
+			if( accumulatedElectricalAngle >=  30 && accumulatedElectricalAngle <  90 ){windingScheme += "b";b++;}
+			if( accumulatedElectricalAngle >=  90 && accumulatedElectricalAngle < 150 ){windingScheme += "C";C++;}
+			if( accumulatedElectricalAngle >= 150 && accumulatedElectricalAngle < 210 ){windingScheme += "a"; a++;}
+			if( accumulatedElectricalAngle >= 210 && accumulatedElectricalAngle < 270 ){windingScheme += "B";B++;}
+			if( accumulatedElectricalAngle >= 270 && accumulatedElectricalAngle < 330 ){windingScheme += "c"; c++;}
+			windingScheme += "|";
+			accumulatedElectricalAngle = (accumulatedElectricalAngle + electricalSlotAngle) % 360;
+		}
+
+	}
+
+	isManualScheme = false;
+	if( a == b && a == c && A == B && A == C  && windingScheme.indexOf('a')!=-1 && windingScheme.indexOf('A')!=-1){
+		while( windingScheme.charAt(windingScheme.length-1) == 'a' || windingScheme.charAt(windingScheme.length-1) == 'A' ) {
+			windingScheme = windingScheme.charAt(windingScheme.length-1) + windingScheme.slice( 0, -1 );
+		}
+	}
+	if( windingScheme.charAt( 0 ) == "a" ) {
+		windingScheme = windingScheme.replace( /a/g, 'x' );
+		windingScheme = windingScheme.replace( /b/g, 'y' );
+		windingScheme = windingScheme.replace( /c/g, 'z' );
+		windingScheme = windingScheme.replace( /A/g, 'a' );
+		windingScheme = windingScheme.replace( /B/g, 'b' );
+		windingScheme = windingScheme.replace( /C/g, 'c' );
+		windingScheme = windingScheme.replace( /x/g, 'A' );
+		windingScheme = windingScheme.replace( /y/g, 'B' );
+		windingScheme = windingScheme.replace( /z/g, 'C' );
+	}
+
+	if( windingScheme.search( /[bB]/ ) > windingScheme.search( /[cC]/ ) ) {
+		windingScheme = windingScheme.replace( /b/g, 'x' );
+		windingScheme = windingScheme.replace( /c/g, 'y' );
+		windingScheme = windingScheme.replace( /x/g, 'c' );
+		windingScheme = windingScheme.replace( /y/g, 'b' );
+		windingScheme = windingScheme.replace( /B/g, 'x' );
+		windingScheme = windingScheme.replace( /C/g, 'y' );
+		windingScheme = windingScheme.replace( /x/g, 'C' );
+		windingScheme = windingScheme.replace( /y/g, 'B' );
+	}
+
+	if(distributedWinding){
+		distributedWinding = windingScheme;
+		var slotPatternParts = windingScheme.split('|');
+		windingScheme = "";
+		sectionedScheme = "";
+		for(i=1;i<slotPatternParts.length;i++){
+			windingScheme = windingScheme+"-";
+			sectionedScheme = windingScheme;
+		}
+		windingScheme = windingScheme.replace(/\|/g,'').replace(/a/g,'').replace(/b/g,'').replace(/c/g,'');
+		if(distributedWinding.replace(/a/g,'').length == distributedWinding.replace(/A/g,'').length && distributedWinding.replace(/b/g,'').length == distributedWinding.replace(/B/g,'').length && distributedWinding.replace(/c/g,'').length == distributedWinding.replace(/C/g,'').length) {
+			if( a != b || a != c || A != B || A != C ){
+				displayWindingResults(slotCount,poleCount,windingScheme,labels.unbalancedSolution,false,windingScheme);
+			}else{
+				displayWindingResults(slotCount,poleCount,windingScheme,false,false,windingScheme);
+			}
+		}else{
+			displayWindingResults(slotCount,poleCount,windingScheme,labels.unbalancedSolution,false,windingScheme);
+		}
+	}else{
+		if( a != b || a != c || A != B || A != C ) {
+			displayWindingResults(slotCount,poleCount,windingScheme,labels.unbalancedSolution,false,windingScheme);
+		}else{
+			displayWindingResults(slotCount,poleCount,windingScheme,false,false,windingScheme);
+		}
+	}
+
+}
+</script>
+  <style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#233247;background:#f3f5f8;font-synthesis:none}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;line-height:1.5}
+button,input,select{font:inherit}
+button,input[type=submit],input[type=button],select{cursor:pointer}
+button,input[type=submit],input[type=button]{border:1px solid #ccd5e1;background:#fff;color:#30445e;border-radius:7px;padding:9px 14px;font-size:13px;font-weight:600;line-height:1.4}
+button:hover,input[type=button]:hover{border-color:#879bb5;background:#f5f8fc}
+button:disabled,select:disabled{cursor:default;opacity:.6}
+#statorToggle:disabled{color:#8793a2;background:#f3f5f7;border-color:#dce2e9;opacity:1}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #9ec9ff;outline-offset:3px}
+input:not([type=checkbox]):not([type=submit]):not([type=button]),select{min-width:0;width:100%;border:1px solid #cbd5e1;border-radius:7px;background:#fff;color:#24364d;min-height:40px;padding:8px 10px;font-size:14px}
+input[type=checkbox]{accent-color:#2563a6;width:16px;height:16px;margin:0}
+main{max-width:1160px;padding:34px 24px 56px;margin:auto}
+.page-heading{margin-bottom:24px}
+h1{font-size:30px;line-height:1.25;letter-spacing:-.7px;font-weight:700;margin:0;color:#1d3048}
+.calculator-section{background:white;border:1px solid #dce3ec;border-radius:12px;margin:16px 0;padding:22px 24px;box-shadow:0 2px 5px #243b5310;min-width:0}
+.section-heading{display:flex;align-items:center;gap:10px;margin-bottom:20px}
+.section-heading h2{font-size:17px;line-height:1.4;margin:0;font-weight:650;color:#283c55}
+.section-number{display:inline-flex;align-items:center;justify-content:center;width:27px;height:27px;border-radius:7px;background:#edf3fa;color:#41678f;font-size:12px;font-weight:700;flex:none}
+.parameter-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}
+.field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.field>label,.field-title{font-size:12px;font-weight:600;color:#52647b}
+.termination-fields{display:contents}
+#coilConnectionControls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:16px}
+.form-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
+#calculateWindingButton{background:#285f98;border-color:#285f98;color:#fff}
+#calculateWindingButton:hover{background:#1f4d7f}
+#info:empty,#exportStatus:empty,#factorDetails:empty,#relatedLinksContainer:empty{display:none}
+.field-help{font-size:12px;color:#65758a;margin-top:12px}
+#info span{color:inherit!important;font-size:inherit!important}
+.manual-scheme #slotField{grid-column:1/-1}
+.manual-scheme #slotCount{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.view-toolbar,.view-buttons,.export-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.view-toolbar{justify-content:space-between;gap:18px}
+.export-controls select{width:auto;min-width:150px}
+.checkbox-label{display:flex;align-items:center;gap:7px;font-size:13px;color:#52647b;cursor:pointer}
+#exportStatus{font-size:12px;color:#41678f;margin-top:12px}
+.properties-overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+#primaryProperties{display:contents}
+.property-metric{display:flex;flex-direction:column;align-items:flex-start;gap:5px;padding:14px 16px;background:#f6f8fb;border:1px solid #e8edf3;border-radius:8px}
+.property-metric>span{font-size:12px;color:#65758a}
+.property-metric strong{font-size:23px;font-weight:650;line-height:1.3;color:#273c55}
+.property-metric small{font-size:11px;color:#7a889a}
+.text-button{padding:0;border:0;background:none;color:#2c659e;font-size:11px;line-height:1.5;font-weight:500;text-align:left}
+.text-button:hover{background:none;text-decoration:underline;border:0}
+#coilConnectionSummary{font-size:12px;color:#52647b;margin-top:16px}
+details{font-size:12px;margin-top:16px;padding-top:14px;border-top:1px solid #e8edf3}
+summary{cursor:pointer;font-weight:600;color:#41678f}
+details p{color:#65758a}
+.table-scroll{overflow-x:auto}
+#coilConnectionDetails table{width:100%;border-collapse:collapse;margin-top:12px;text-align:left}
+#coilConnectionDetails th{padding:8px 12px;background:#f6f8fb;font-size:11px;color:#65758a}
+#coilConnectionDetails td{border-bottom:1px solid #edf0f5}
+.scheme-result{margin-top:16px;padding-top:14px;border-top:1px solid #e8edf3}
+#windingSchemeResult{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:14px;letter-spacing:1.5px;overflow-wrap:anywhere;margin-top:6px}
+#factorDetails{overflow-x:auto;margin-top:18px;padding-top:16px;border-top:1px solid #e8edf3;font-size:12px}
+#factorParameterFields{overflow-x:auto;margin-top:14px;font-size:12px}
+#factorParameterFields input:not([type=checkbox]){width:auto;max-width:100%;min-height:28px;padding:4px;font-size:12px}
+#factorParameterFields table,#factorDetails table{font-size:11px;min-width:620px}
+#factorCorrectionInputs td{padding:5px;background:#f6f8fb}
+#coilTurnsEditor{margin:14px 0}
+#relatedLinksContainer{font-size:12px;margin-top:12px}
+.animation-heading{justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:8px}
+.animation-heading .section-title{display:flex;align-items:center;gap:10px}
+#steps{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px}
+#steps button{font-size:12px;padding:6px 11px}
+#windingCanvasContainer{width:100%;min-width:0;overflow-x:auto;background:#fff}
+#statorCanvas{display:block;margin:0 auto;width:100%;max-width:800px;height:auto}
+#linearWinding{padding:4px 0!important}
+#windingProperties{padding-top:16px;padding-bottom:16px}
+#windingProperties .section-heading{margin-bottom:12px}
+#windingProperties .scheme-result{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;border:0;margin:0;padding:0}
+#windingProperties .scheme-result .field-title{font-size:11px}
+#windingProperties #windingSchemeResult{font-size:13px;margin:0;min-width:0;max-width:100%}
+#windingProperties .properties-overview{gap:8px;margin-top:12px}
+#windingProperties .property-metric{padding:8px 10px;gap:2px}
+#windingProperties .property-metric>span{font-size:11px}
+#windingProperties .property-metric strong{font-size:17px}
+#windingProperties .property-metric small{font-size:10px}
+#windingProperties #coilConnectionSummary{font-size:11px;margin-top:8px}
+#windingProperties details{font-size:11px;margin-top:10px;padding-top:8px}
+#windingProperties #coilConnectionDetails td{padding:4px 8px!important}
+#windingProperties #coilConnectionDetails th{padding:5px 8px;font-size:10px}
+#factorDetails{margin-top:12px;padding-top:10px;font-size:11px}
+.factor-plot-heading{font-size:11px;font-weight:600;color:#52647b;margin-bottom:6px}
+.factor-plot{overflow-x:auto}
+.factor-plot svg{display:block;min-width:560px;width:100%;height:210px;font-family:inherit}
+.factor-plot-legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:10px;color:#748397}
+.factor-plot-legend span{display:flex;align-items:center;gap:5px}
+.factor-plot-legend i{display:inline-block;width:8px;height:8px;border-radius:2px}
+.factor-bar:hover{fill:#1c425f}
+#steps{display:none}
+@media(min-width:900px){.termination-fields:has(#coilShortening){display:grid;grid-template-columns:1fr 1fr;grid-column:span 2}.parameter-grid:has(#coilShortening){grid-template-columns:repeat(5,minmax(0,1fr))}}
+@media(max-width:760px){main{padding:24px 14px 40px}h1{font-size:25px}.calculator-section{padding:18px 16px}.parameter-grid,.properties-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.view-toolbar{align-items:flex-start;flex-direction:column}.export-controls{width:100%}.export-controls select{flex:1}}
+@media(max-width:420px){#coilConnectionControls{grid-template-columns:1fr}.property-metric{padding:12px}.property-metric>span{font-size:11px}.view-buttons button{padding:8px 10px}.checkbox-label{width:100%}}
+</style>
+
+<script>
+window.addEventListener('DOMContentLoaded', function () {
+    document.getElementById('slotCount').value='12';
+    document.getElementById('poleCount').value='10';
+    updateLayerControl(false,false,false);
+    updateShorteningControl();
+    document.getElementById('phaseTermination').value='Y';
+    calculateWinding();
+});
+</script>
+</head>
+
+<body>
+<main>
+  <header class="page-heading"><h1 id="statorHeading">Winding Layout Calculator</h1></header>
+
+  <section class="calculator-section" id="windingParameters" aria-labelledby="parametersHeading">
+    <div class="section-heading"><span class="section-number" aria-hidden="true">1</span><h2 id="parametersHeading">Winding Parameters</h2></div>
+    <div id="jsContainer"><noscript>Enable JavaScript to use the winding calculator.</noscript></div>
+    <div id="coilConnectionControls" hidden>
+      <div class="field"><label for="coilConnectionMode">Coil connection</label><select id="coilConnectionMode" onchange="changeCoilConnections()">
+        <option value="series">Series</option><option value="parallel">Parallel</option><option value="series-parallel">Series / parallel</option><option value="series-antiparallel">Series / antiparallel</option>
+      </select></div>
+      <div class="field"><label for="parallelBranches">Parallel branches per phase</label><select id="parallelBranches" onchange="changeCoilConnections()"><option value="1">1</option></select></div>
+    </div>
+    <details id="additionalParameters" ontoggle="if(this.open)ensureFactorParameters();"><summary>Additional winding parameters</summary><div id="factorParameterFields"></div></details>
+  </section>
+
+  <section class="calculator-section" id="windingProperties" aria-labelledby="propertiesHeading">
+    <div class="section-heading"><span class="section-number" aria-hidden="true">2</span><h2 id="propertiesHeading">Winding Properties</h2></div>
+    <div class="scheme-result"><div class="field-title">Winding scheme</div><div id="windingSchemeResult" role="status"></div></div>
+    <div class="properties-overview">
+      <div id="primaryProperties"></div>
+      <div class="property-metric"><span>Winding symmetry</span><strong id="symmetryValue">—</strong><small>Geometric symmetry groups</small></div>
+      <div class="property-metric"><span>Coils / phase / symmetry group</span><strong id="symmetryGroupCoils">—</strong><small>Before parallel grouping</small></div>
+    </div>
+    <div id="coilConnectionSummary" role="status"></div>
+    <details id="coilConnectionDetails" hidden>
+      <summary>Branch and group connections</summary>
+      <p>E → S reverses a group's reference terminals to match the other branches. The coil arrows already include this reversal.</p>
+      <div class="table-scroll"><table><thead><tr><th>Branch</th><th>Coils in series (tooth / slot pair)</th><th>Group reference direction</th></tr></thead><tbody></tbody></table></div>
+    </details>
+    <div id="factorDetails"></div>
+    <div id="relatedLinksContainer"></div>
+  </section>
+
+  <section class="calculator-section" id="viewOptions" aria-labelledby="viewHeading">
+    <div class="section-heading"><span class="section-number" aria-hidden="true">3</span><h2 id="viewHeading">View Options</h2></div>
+    <div class="view-toolbar">
+      <div class="view-buttons">
+        <button id="layoutToggle" type="button" onclick="toggleWindingLayout()" aria-pressed="false">Show circular view</button>
+        <button id="statorToggle" type="button" onclick="toggleStatorView()" aria-pressed="false" disabled>Switch to inner stator</button>
+        <label class="checkbox-label"><input id="showBranchLabels" type="checkbox" checked onchange="if(lastWindingDraw)drawStator(...lastWindingDraw);" />Branch labels</label>
+      </div>
+      <div class="export-controls">
+        <select id="exportFormat" aria-label="Export format"><option value="svg">Editable SVG</option><option value="png">PNG image</option></select>
+        <button id="saveWinding" type="button" onclick="saveWinding()">Save winding</button>
+      </div>
+    </div>
+    <div id="exportStatus" role="status"></div>
+  </section>
+
+  <section class="calculator-section" id="windingAnimation" aria-labelledby="animationHeading">
+    <div class="section-heading animation-heading">
+      <div class="section-title"><span class="section-number" aria-hidden="true">4</span><h2 id="animationHeading">Winding Animation</h2></div>
+      <div id="steps"></div>
+    </div>
+    <div id="windingCanvasContainer"></div>
+  </section>
+</main>
+</body>
+</html>
