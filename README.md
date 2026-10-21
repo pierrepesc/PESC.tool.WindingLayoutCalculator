@@ -1,7 +1,7 @@
 # PESC.tool.WindingSchem
 Winding Layout Calculator
 
-Open [winding_visualizer.html](winding_visualizer.html) in a browser for the standalone winding calculator, with linear and circular views, inner and outer stators, Y/delta connections, and SVG/PNG export. All JavaScript and CSS are embedded; no installation, server, or external dependencies are required.
+Open [index.html](index.html) in a browser for the standalone winding calculator, with linear and circular views, inner and outer stators, Y/delta connections, and SVG/PNG export. All JavaScript and CSS are embedded; no installation, server, or external dependencies are required.
 
 The interface is organized into Winding Parameters, Winding Properties, View Options, and Winding Animation. Motor inputs and manual schemes are at the top; the compact properties section starts with the winding scheme. Factor details are collapsed by default and show a harmonic spectrum plot with hover values when expanded.
 
